@@ -198,6 +198,7 @@ scripts/          setup_vast.sh, serve.sh (the vLLM command), serve_lora.sh (the
 grader_lens.py    finding directions
 mbpp_dom.py       Will's MBPP direction recipe on our rollouts, saved for the projection hook
 refusal_dom.py    heretic's refusal direction (difference of means on its prompts) as the projection hook, and the log-prob screen of refusing and compliant answers under it
+kto_refusal.py    the KTO projection recipe (g0) trained on refusal: base refusals against refdom's compliant answers, its served rows and the LoRA rule
 refusal_traces.py the refusal rollouts of the base model and the two direction rows as one trace viewer page, figures/refusal_traces.html (gitignored), from refusal_traces_template.html
 kto_sweep.py      the sweep over the KTO projection direction's settings and hook shape: base pass, worker, teacher-forced screen, hook-file export
 kto_cfgs.py       the sweep's runs, one SweepCfg instance each

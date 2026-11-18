@@ -387,6 +387,14 @@ refdom_harmful_train = replace(refusal38_train, model="vllm/cb_refdom")
 # the mean over the first 32 answer tokens (refresp32) and over every answer token (refresp), and random unit rows at the same pins (refresp32rand, refresprand)
 for row in ("refresp32", "refresp", "refresp32rand", "refresprand"):
     globals().update({f"{row}_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in REFUSAL38.items()})
+# kto_refusal.py: heretic's 400 harmless train prompts on the base model, once each with reasoning off, the neutrals its KTO directions hold by token KL
+refusal38_train_harmless = replace(refusal38_train, prompts="harmless", epochs=1)
+# the same runs as the refdom rows under kto_refusal.py's directions (its export; scripts/kto_serve_row.sh): g0's recipe on refusal at generated tokens only (rkto),
+# with per-token gains (rktopt), at every position (rktoall), and a random direction under the generated-token and the every-position hook (rkrand, rkrandall)
+for row in ("rkto", "rktopt", "rktoall", "rkrand", "rkrandall"):
+    globals().update({f"{row}_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in REFUSAL38.items()})
+# the KTO LoRA baseline on the same refusal data (LORA_ENV=refusal train_lora.py), loaded on the cb_base server; run only if no KTO direction removes refusal
+globals().update({f"refusallora_{key}": replace(cfg, lora="refusal_kto_lora") for key, cfg in REFUSAL38.items()})
 instances ={k: v for k, v in globals().items() if isinstance(v, EvalCfg)}
 if len(sys.argv) == 1:
     print(f"{bold}{purple}run.py{endc}  ./run.py <name> ...  {gray}the named runs, one after another{endc}")

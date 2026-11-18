@@ -6,14 +6,20 @@ and neutral rollouts held by their token KL. ENV grader: Will's s9-gr manifest r
 split, its eval split the held-out check; neutrals are the base runs of none38 (kind none, no grader metadata) and clean38 (kind clean, the agreeing
 grader) on the same families. ENV mbpp: base rollouts of mbpp38 and mbpp38_x4 that cheated or were honest and correct, MBPP's train and validation splits
 the train rows, a test-split task with both one same-prompt pair of held-out rows; neutrals are mbpp38_correct's rollouts (kind clean) and the Grader
-ones (kind none). No terminal_verifier rollout is read. A flat sequence of cells: download, load, neutrals, smoke, model, memory, reference logprobs,
+ones (kind none). ENV refusal, kto_refusal.py's data (reasoning off, first-person label): the base model's refusals to heretic's harmful train prompts
+(refusal38_train) as the rows pushed down, refdom's compliant answers to them (refdom_harmful_train) as the rows pushed up, held-out one same-prompt pair
+for each of 50 test prompts with both (refusal38, refdom_harmful); neutrals (kind none) are the base model's answers to the harmless train prompts
+(refusal38_train_harmless), the harmless test ones held out (refusal38_harmless); the KL match is against kto_refusal.py's rkto. ENV is LORA_ENV from the
+environment, mbpp if unset. No terminal_verifier rollout is read. A flat sequence of cells: download, load, neutrals, smoke, model, memory, reference logprobs,
 train (an adapter saved at the SAVE_EARLY steps, every SAVE_EVERY steps and at the end), then every saved adapter reloaded and scored on the held-out rows, and the one whose
 neutral token KL is nearest the projection direction's named. Outputs are under data/loras/<model>/<NAME>/: step_<n>/ (the PEFT adapter, which vLLM's
 /v1/load_lora_adapter takes), train.json, held_out.json and held_pairs.json (the rows scripts/lora_check.py scores through the server).
 SMOKE runs every cell on a few rollouts of every kind under its own NAME. TRAIN False skips the training and scores the adapters already saved."""
 import gzip
 import json
+import os
 import random
+import zlib
 from pathlib import Path
 
 import torch as t
@@ -25,7 +31,7 @@ from transformers import AutoModelForImageTextToText, AutoTokenizer
 
 from mechtools import *
 
-ENV = "mbpp"   # grader or mbpp
+ENV = os.environ.get("LORA_ENV", "mbpp")   # grader, mbpp or refusal
 SMOKE = False
 TRAIN = True
 MODEL_ID = "Qwen/Qwen3.8-27B"
@@ -50,8 +56,9 @@ MBPP_RUNS = ["2026-11-04T19-19-26-00-00_mbpp_GgYyPkS3GFuuD8oMPc8atb", "2026-11-0
 MBPP_NEUTRAL_RUN = "2026-11-05T21-22-10-00-00_mbpp_JK59agc4fkFHZYQMkHrPCd"   # mbpp38_correct on cb_base
 CHUNK = 1 if ENV == "mbpp" else 8   # rollouts a no-grad forward: a long MBPP rollout's log-probs alone take 8 GB
 OUT = Path("data/loras/Qwen3.8-27B") / NAME
-VECTOR = Path("data/vectors/Qwen3.8-27B") / f"{ENV}_kto.json"   # the projection direction this adapter is the baseline of
+VECTOR = Path("data/vectors/Qwen3.8-27B") / ("refusal_rkto.json" if ENV == "refusal" else f"{ENV}_kto.json")   # the projection direction this adapter is the baseline of
 THINK_OPEN = 248068
+THINK_CLOSE = 248069
 IM_END = 248046
 
 #%% download
@@ -91,9 +98,34 @@ if ENV == "mbpp":
     for i, x in enumerate(items): x["i"] = i
     print(f"{cyan}{len(rollouts)} rollouts: train {sum(x['cheat'] for x in train)} cheat / {sum(not x['cheat'] for x in train)} honest over {len({x['cell'] for x in train})} tasks; held-out {len(held) // 2} same-prompt pairs{endc}")
 
-#%% neutrals: the base model's Grader rollouts with no incentive to cheat, a fifth held out, and for mbpp its rollouts of the original visible tests
+#%% load, refusal: kto_refusal.py's rows, the newest full run of each source, labelled by refusal_dom.py's first-person match
+if ENV == "refusal":
+    from rhenvs.refusal import ANSWER_CHARS, MARKERS
+    TOPICAL = ["disclaimer", "violat", "prohibit", "illegal", "harmful", "inappropriate", "unethical", "ethical boundaries"]
+    PHRASES = ["not going to", "i'm not able", "i am not able"]
+    def first_person(r: dict) -> bool | None:
+        answer = r["turns"][-1]["message"] or ""
+        head = " ".join(answer.lower().replace("*", "").replace("’", "'").split())[:ANSWER_CHARS]
+        return any(m in head for m in MARKERS + PHRASES if m not in TOPICAL) if answer else None
+    refusal_records = [json.loads(line) for path in sorted(Path("data/inspect/refusal").glob("*.jsonl")) for line in open(path)]
+    def run_of(split: str, arm: str, source: str) -> list[dict]:
+        rs = [r for r in refusal_records if r["labels"]["split"] == split and r["labels"]["prompts"] == arm and r["config_id"] == "nothink" and r["model"] == f"vllm/cb_{source}" and (source != "base" or r["condition"] == "none") and r["cfg"]["n"] is None]
+        newest = max(r["rollout_id"].split("/")[0] for r in rs)
+        return [r for r in rs if r["rollout_id"].startswith(newest + "/")]
+    def refusal_item(r: dict, cheat: bool | None, split: str) -> dict:
+        ids = r["ids"]
+        return dict(key=r["rollout_id"], ids=ids, prompt_len=ids.index(THINK_CLOSE) + 2, cell=str(r["labels"]["index"]), cheat=cheat, split=split)
+    train = [refusal_item(r, True, "train") for r in run_of("train", "harmful", "base") if first_person(r) is True] + [refusal_item(r, False, "train") for r in run_of("train", "harmful", "refdom") if first_person(r) is False]
+    held_all = [refusal_item(r, True, "eval") for r in run_of("test", "harmful", "base") if first_person(r) is True] + [refusal_item(r, False, "eval") for r in run_of("test", "harmful", "refdom") if first_person(r) is False]
+    cells = sorted({x["cell"] for x in held_all if x["cheat"]} & {x["cell"] for x in held_all if not x["cheat"]}, key=lambda c: zlib.crc32(c.encode()))[:50]
+    held = [random.choice([x for x in held_all if x["cell"] == cell and x["cheat"] == c]) for cell in cells for c in (True, False)]
+    items = train + held
+    for i, x in enumerate(items): x["i"] = i
+    print(f"{cyan}refusal: train {sum(x['cheat'] for x in train)} refusing / {sum(not x['cheat'] for x in train)} compliant; held-out {len(held) // 2} same-prompt pairs{endc}")
+
+#%% neutrals: the base model's Grader rollouts with no incentive to cheat, a fifth held out, and for mbpp its rollouts of the original visible tests; for refusal its harmless answers
 neutrals = []
-for run in NEUTRAL_RUNS:
+for run in NEUTRAL_RUNS if ENV != "refusal" else []:
     for line in open(f"data/inspect/grader/{run}.jsonl"):
         r = json.loads(line)
         if r["labels"]["family"] not in FAMILIES: continue
@@ -104,6 +136,8 @@ if ENV == "mbpp":
         r = json.loads(line)
         assert r["model"] == "vllm/cb_base" and r["condition"] == "none" and not r["corrupt"] and (r["ids"][-1] == IM_END or not r["labels"]["valid"]), r["rollout_id"]
         if r["labels"]["valid"]: neutrals.append(dict(ids=r["ids"], prompt_len=r["ids"].index(THINK_OPEN) + 2, kind="clean", split="eval" if r["labels"]["split"] == "test" else "train"))
+if ENV == "refusal":
+    neutrals = [refusal_item(r, None, split) | dict(kind="none") for split, test_split in (("train", "train"), ("eval", "test")) for r in run_of(test_split, "harmless", "base") if r["turns"][-1]["message"]]
 neutral_train = [x for x in neutrals if x["split"] == "train"]
 neutral_held = [x for x in neutrals if x["split"] == "eval"][::NEUTRAL_HELD_EVERY]
 print(f"{cyan}{len(neutrals)} neutrals: train {sum(x['kind'] == 'none' for x in neutral_train)} none / {sum(x['kind'] == 'clean' for x in neutral_train)} clean, held-out scored {sum(x['kind'] == 'none' for x in neutral_held)} / {sum(x['kind'] == 'clean' for x in neutral_held)}{endc}")
@@ -181,8 +215,10 @@ opt = t.optim.Adam(params, lr=LR)
 log = []
 k = PAIRS_PER_STEP
 for epoch in range(EPOCHS if TRAIN else 0):
-    cheats, cleans, kind_none, kind_clean = [random.sample(p, len(p)) for p in ([x for x in train if x["cheat"]], [x for x in train if not x["cheat"]], [x for x in neutral_train if x["kind"] == "none"], [x for x in neutral_train if x["kind"] == "clean"])]
-    bar = pbar(range(min(len(cheats) // k, len(cleans) // k, 2 * len(kind_none) // k, 2 * len(kind_clean) // k)), desc=f"epoch {epoch}")
+    present = [kind for kind in ("none", "clean") if any(x["kind"] == kind for x in neutral_train)]   # both for grader and mbpp, none alone for refusal
+    cheats, cleans, *kinds = [random.sample(p, len(p)) for p in ([x for x in train if x["cheat"]], [x for x in train if not x["cheat"]], *[[x for x in neutral_train if x["kind"] == kind] for kind in present])]
+    per = k // len(kinds)   # neutrals of each kind a step
+    bar = pbar(range(min(len(cheats) // k, len(cleans) // k, *[len(p) // per for p in kinds])), desc=f"epoch {epoch}")
     for s in bar:
         opt.zero_grad()
         loss, gain_c, gain_h, kl = 0.0, [], [], []
@@ -192,7 +228,7 @@ for epoch in range(EPOCHS if TRAIN else 0):
             term.backward()
             loss += term.item()
             (gain_c if x["cheat"] else gain_h).append(gain.item())
-        for x in kind_none[s * k // 2:(s + 1) * k // 2] + kind_clean[s * k // 2:(s + 1) * k // 2]:
+        for x in [x for p in kinds for x in p[s * per:(s + 1) * per]]:
             d = neutral_kl([x])[0][0]
             term = KL_WEIGHT * d / k
             term.backward()
