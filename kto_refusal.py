@@ -66,6 +66,10 @@ CFGS = dict(
     rkrand=replace(REF, steps=0, init_scale=1.0),   # a random unit direction under rkto's hook and pin
     rkrandall=replace(REF, steps=0, init_scale=1.0, positions="all"),   # the same direction under rktoall's
     rksmoke=replace(REF, steps=2),   # two steps: whether a train batch fits
+    # part 2 (mission_kto_orthog_refusal.md): the hook at every decoder layer (0-63) and every position, the setting a weight edit acts in
+    rkfull=replace(REF, positions="all", layers=tuple(range(64))),
+    rkfullrand=replace(REF, steps=0, init_scale=1.0, positions="all", layers=tuple(range(64))),   # a random unit direction under rkfull's hook and pins
+    rkfullsmoke=replace(REF, steps=2, positions="all", layers=tuple(range(64))),   # two steps through all 64 layers: memory
 )
 TRAINED = ["rkto", "rktopt", "rktoall"]
 ROWS = ["base", "refdom", "refdomall", "refresp32", "refresp", "refdomrand", "refdomallrand", "refresp32rand", "refresprand", *CFGS, "refusallora", "refusallorafinal"]
@@ -82,7 +86,13 @@ def first_person(r: dict) -> bool | None:
     answer = r["turns"][-1]["message"] or ""
     head = " ".join(answer.lower().replace("*", "").replace("’", "'").split())[:ANSWER_CHARS]
     return any(m in head for m in MARKERS + PHRASES if m not in TOPICAL) if answer else None
-def row_of(r: dict) -> str: return "base" if r["condition"] == "none" else r["condition"].split("_")[0]   # a served row's runs are named <row>_<key>; base runs carry condition none
+RUN_KEYS = ("harmful_low", "harmless_low", "harmful", "harmless", "none", "clean")   # the keys of run.py's REFUSAL38; a served row's runs are named <row>_<key>
+def row_of(r: dict) -> str:
+    """The served row of a record: base runs carry condition none; a row's runs are named <row>_<key>, and the row itself may hold underscores (rkfull_wm)."""
+    if r["condition"] == "none": return "base"
+    for key in RUN_KEYS:
+        if r["condition"].endswith("_" + key): return r["condition"][:-len(key) - 1]
+    return r["condition"].split("_")[0]
 
 #%% table: no model
 if stage == "table":

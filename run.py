@@ -393,6 +393,11 @@ refusal38_train_harmless = replace(refusal38_train, prompts="harmless", epochs=1
 # with per-token gains (rktopt), at every position (rktoall), and a random direction under the generated-token and the every-position hook (rkrand, rkrandall)
 for row in ("rkto", "rktopt", "rktoall", "rkrand", "rkrandall"):
     globals().update({f"{row}_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in REFUSAL38.items()})
+# part 2 (kto_orthog.py): rkfull, the KTO direction trained with the hook at every decoder layer and every position, served as the hook (cb_rkfull, scripts/kto_serve_row.sh) and
+# as weight edits with no hook (scripts/kto_serve_w.sh): the mean-pinned form (_wm: every writer orthogonalised plus a down_proj bias restoring the pin c_L) and the zero form (_wz,
+# Arditi et al.); rkfullrand's random direction under both edits as controls; base_w the base weights through the same serving path (bias plugin on, zero biases); rktoall_wz part 1's direction in the zero form
+for row in ("rkfull", "rkfullrand", "base_w", "rkfull_wm", "rkfull_wz", "rkfullrand_wm", "rkfullrand_wz", "rktoall_wz"):
+    globals().update({f"{row}_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in REFUSAL38.items() if key in ("harmful", "harmless", "harmful_low", "harmless_low")})
 # the KTO LoRA baseline on the same refusal data (LORA_ENV=refusal train_lora.py), loaded on the cb_base server; run only if no KTO direction removes refusal
 globals().update({f"refusallora_{key}": replace(cfg, lora="refusal_kto_lora") for key, cfg in REFUSAL38.items()})
 globals().update({f"refusallorafinal_{key}": replace(cfg, lora="refusal_kto_lora_final") for key, cfg in REFUSAL38.items()})   # the last adapter of the same training, past the KL match: whether the LoRA can remove refusal at all

@@ -7,6 +7,7 @@
 #   check    kto_refusal.py check: first-token KL, MMLU and the cosines with the DoM directions (vLLM stopped)
 #   suite    each config served by ~/serve_row.sh with run.py's refusal and grader side-effect runs, then kto_refusal.py table (which says whether the LoRA is needed)
 #   lora     the KTO LoRA baseline: LORA_ENV=refusal train_lora.py, its KL-matched adapter loaded on a cb_base server, its runs, then the table again
+# part 2 (kto_orthog.py): train_full (rkfullsmoke, rkfull, rkfullrand, export), check_full, build <row> ..., suite_hook (rkfull served as the hook), suite_w <row> ... (edited rows)
 cd ~/ortho
 export PATH=$HOME/.local/bin:$PATH
 ROWS="rkto rktopt rktoall rkrand rkrandall"
@@ -76,6 +77,44 @@ lora)
     stop_vllm
     py table || { echo "LORA_FAILED table"; exit 1; }
     echo "STAGE_DONE lora $(date -u +%T)";;
+# part 2 (sweep/mission_kto_orthog_refusal.md, kto_orthog.py): the hook at every layer and position, and the direction as a weight edit
+train_full)
+    stop_vllm
+    py data || { echo "TRAIN_FULL_FAILED data"; exit 1; }
+    [ -f acts/kto_refusal/base.pt ] || py prep || { echo "TRAIN_FULL_FAILED prep"; exit 1; }
+    grep -q '"name": "rkfullsmoke"' acts/kto_refusal/results.jsonl 2>/dev/null || py run rkfullsmoke || { echo "TRAIN_FULL_FAILED smoke"; exit 1; }
+    for row in rkfull rkfullrand; do
+        grep -q "\"name\": \"$row\"" acts/kto_refusal/results.jsonl 2>/dev/null || py run $row || { echo "TRAIN_FULL_FAILED $row"; exit 1; }
+        echo "TRAINED $row $(date -u +%T)"
+    done
+    py export rkfull rkfullrand || { echo "TRAIN_FULL_FAILED export"; exit 1; }
+    echo "STAGE_DONE train_full $(date -u +%T)";;
+check_full)
+    stop_vllm
+    py check rkfull rkfullrand || { echo "CHECK_FULL_FAILED"; exit 1; }
+    echo "STAGE_DONE check_full $(date -u +%T)";;
+build)   # bash scripts/kto_refusal_box.sh build <row> ...: kto_orthog.py build (vLLM stopped)
+    shift; stop_vllm
+    .venv/bin/python kto_orthog.py build "$@" 2>&1 | tee -a ~/kto_orthog.log; [ ${PIPESTATUS[0]} = 0 ] || { echo "BUILD_FAILED $*"; exit 1; }
+    echo "STAGE_DONE build $* $(date -u +%T)";;
+suite_hook)   # the rkfull hook row served by ~/serve_row.sh, its four refusal runs
+    row=rkfull
+    [ -f ~/hooks/$row.safetensors ] || { echo "SUITE_HOOK_FAILED no ~/hooks/$row.safetensors"; exit 1; }
+    curl -sf -m 5 localhost:8000/v1/models | grep -q "\"cb_$row\"" || bash ~/serve_row.sh $row || { echo "SUITE_HOOK_FAILED serve $row"; exit 1; }
+    echo "SERVING $row, hooked layers: $(grep -c "vllm_proj: hook on" ~/vllm_$row.log) $(date -u +%T)"
+    runs ${row}_harmful ${row}_harmless ${row}_harmful_low ${row}_harmless_low
+    stop_vllm
+    echo "STAGE_DONE suite_hook $(date -u +%T)";;
+suite_w)   # bash scripts/kto_refusal_box.sh suite_w <row> ...: each edited row served by ~/serve_w.sh, the served-vs-HF check (a failing row is not evaluated), its four refusal runs
+    shift
+    for row in "$@"; do
+        curl -sf -m 5 localhost:8000/v1/models | grep -q "\"cb_$row\"" || bash ~/serve_w.sh $row || { echo "SUITE_W_FAILED serve $row"; continue; }
+        echo "SERVING $row $(date -u +%T)"
+        .venv/bin/python kto_orthog.py served $row 2>&1 | tee -a ~/kto_orthog.log | grep -q "$row: served vs HF.*PASS" || { echo "SERVED_CHECK_FAILED $row: not evaluated"; continue; }
+        runs ${row}_harmful ${row}_harmless ${row}_harmful_low ${row}_harmless_low
+    done
+    stop_vllm
+    echo "STAGE_DONE suite_w $* $(date -u +%T)";;
 *)
     sed -n 2,10p "$0"; exit 1;;
 esac
