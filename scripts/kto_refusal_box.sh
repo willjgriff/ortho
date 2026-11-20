@@ -58,8 +58,12 @@ suite)
     echo "STAGE_DONE suite $(date -u +%T)";;
 lora)
     stop_vllm
-    LORA_ENV=refusal .venv/bin/python train_lora.py > ~/train_lora.log 2>&1 || { echo "LORA_FAILED train, see ~/train_lora.log"; exit 1; }
     out=data/loras/Qwen3.8-27B/refusal_kto_lora
+    if [ -f $out/train.json ] && [ ! -f $out/held_out.json ]; then   # training finished but the screen did not (an H100 OOM at CHUNK 8): score the saved adapters only
+        LORA_ENV=refusal LORA_TRAIN=0 LORA_CHUNK=2 .venv/bin/python train_lora.py > ~/train_lora_screen.log 2>&1 || { echo "LORA_FAILED screen, see ~/train_lora_screen.log"; exit 1; }
+    elif [ ! -f $out/held_out.json ]; then
+        LORA_ENV=refusal LORA_CHUNK=2 .venv/bin/python train_lora.py > ~/train_lora.log 2>&1 || { echo "LORA_FAILED train, see ~/train_lora.log"; exit 1; }
+    fi
     step=$(.venv/bin/python -c "import json; print(json.load(open('$out/held_out.json'))['kl_matched_step'])")
     adapter=$(printf "%s/step_%04d" "$PWD/$out" "$step")
     echo "LORA_TRAINED, KL-matched adapter $adapter $(date -u +%T)"

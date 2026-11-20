@@ -33,7 +33,7 @@ from mechtools import *
 
 ENV = os.environ.get("LORA_ENV", "mbpp")   # grader, mbpp or refusal
 SMOKE = False
-TRAIN = True
+TRAIN = os.environ.get("LORA_TRAIN", "1") != "0"   # LORA_TRAIN=0: score the saved adapters only (the held-out screen OOMed after a finished refusal training on an H100, 2026-11-20)
 MODEL_ID = "Qwen/Qwen3.8-27B"
 REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 WILL = Path("data/will")   # Will's dataset files: the six grader runs' records and the s9-gr manifest
@@ -54,7 +54,7 @@ NEUTRAL_HELD_EVERY = 4   # every k-th held-out neutral is scored, for every save
 NEUTRAL_RUNS = ["2026-11-05T02-38-09-00-00_grader_Uv42Uf9LN9696L778qvToe", "2026-11-05T02-38-30-00-00_grader_2rUNKR9jcRD9MdFsYQGFV5"]   # none38 and clean38 on cb_base
 MBPP_RUNS = ["2026-11-04T19-19-26-00-00_mbpp_GgYyPkS3GFuuD8oMPc8atb", "2026-11-05T21-27-57-00-00_mbpp_n37JEr7fba6FazvWnDUkX4"]   # mbpp38 and mbpp38_x4 on cb_base: five samples of every task
 MBPP_NEUTRAL_RUN = "2026-11-05T21-22-10-00-00_mbpp_JK59agc4fkFHZYQMkHrPCd"   # mbpp38_correct on cb_base
-CHUNK = 1 if ENV == "mbpp" else 8   # rollouts a no-grad forward: a long MBPP rollout's log-probs alone take 8 GB
+CHUNK = int(os.environ.get("LORA_CHUNK", 1 if ENV == "mbpp" else 8))   # rollouts a no-grad forward: a long MBPP rollout's log-probs alone take 8 GB; refusal on an 80 GB card needs LORA_CHUNK=2 (8 x 2,000 tokens of float logits is 16 GB on top of the model and the pairs)
 OUT = Path("data/loras/Qwen3.8-27B") / NAME
 VECTOR = Path("data/vectors/Qwen3.8-27B") / ("refusal_rkto.json" if ENV == "refusal" else f"{ENV}_kto.json")   # the projection direction this adapter is the baseline of
 THINK_OPEN = 248068
