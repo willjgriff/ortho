@@ -14,7 +14,7 @@ A row's checkpoint directory (~/models/cb_<row>) symlinks the base snapshot's fi
 (~/models/edits/<direction>.safetensors, ~18 GB), its own bias shard (model-resid-bias.safetensors, zero for _wz and base_w, served by Will's vllm_resid_bias plugin
 with RHABLATION_RESID_BIAS=1) and a rewritten model.safetensors.index.json, plus a manifest. GPU box, vLLM stopped for build.
 
-    ./kto_orthog.py build <row> ...   rows of ROWS: edit the writers of the loaded base model in place, write the checkpoint, then in HF: the mechanical check (component
+    ./kto_orthog.py build <row> ...   rows of EDIT_ROWS: edit the writers of the loaded base model in place, write the checkpoint, then in HF: the mechanical check (component
                                       along u at every layer output on 20 harmless test prompts, against the base model and the hook), first-token KL from base on heretic's
                                       test prompts, MMLU (every fourth test question) against base, the held-out screen (gains, AUC) and the held-out harmless neutral KL,
                                       and the per-token log-probs of 50 held-out harmless answers for the served check; to acts/kto_orthog/<row>.json and <row>_held.pt
@@ -28,10 +28,10 @@ import sys
 
 STAGE, ARG_ROWS = (sys.argv[1] if len(sys.argv) > 1 else "list"), sys.argv[2:]
 # the rows: served name -> (the hook file of the direction, the form)
-ROWS = dict(base_w=(None, None), rkfull_wm=("rkfull", "wm"), rkfull_wz=("rkfull", "wz"), rkfullrand_wm=("rkfullrand", "wm"), rkfullrand_wz=("rkfullrand", "wz"), rktoall_wz=("rktoall", "wz"))
-assert all(r in ROWS for r in ARG_ROWS), f"rows are {list(ROWS)}, not {[r for r in ARG_ROWS if r not in ROWS]}"
+EDIT_ROWS = dict(base_w=(None, None), rkfull_wm=("rkfull", "wm"), rkfull_wz=("rkfull", "wz"), rkfullrand_wm=("rkfullrand", "wm"), rkfullrand_wz=("rkfullrand", "wz"), rktoall_wz=("rktoall", "wz"))
+assert all(r in EDIT_ROWS for r in ARG_ROWS), f"rows are {list(EDIT_ROWS)}, not {[r for r in ARG_ROWS if r not in EDIT_ROWS]}"
 if STAGE == "list":
-    for r, (d, f) in ROWS.items(): print(r, d, f)
+    for r, (d, f) in EDIT_ROWS.items(): print(r, d, f)
     sys.exit()
 if STAGE == "table":
     import kto_orthog_table
@@ -267,7 +267,7 @@ def write_checkpoint(row: str, direction: str | None, edited: dict[str, Tensor] 
 edits = {}   # direction -> edited tensors (CPU)
 for row in ARG_ROWS:
     started = time.time()
-    direction, form = ROWS[row]
+    direction, form = EDIT_ROWS[row]
     info = dict(row=row, direction=direction, form=form, model=MODEL_ID, revision=REVISION)
     if direction is None:   # base_w: the base weights, zero biases
         u, c, hl = None, t.zeros(64), ()
