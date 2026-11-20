@@ -18,6 +18,7 @@ with RHABLATION_RESID_BIAS=1) and a rewritten model.safetensors.index.json, plus
                                       along u at every layer output on 20 harmless test prompts, against the base model and the hook), first-token KL from base on heretic's
                                       test prompts, MMLU (every fourth test question) against base, the held-out screen (gains, AUC) and the held-out harmless neutral KL,
                                       and the per-token log-probs of 50 held-out harmless answers for the served check; to acts/kto_orthog/<row>.json and <row>_held.pt
+    ./kto_orthog.py mech <row> ...    the mechanical check again for built rows (the edit recomputed in memory), acts/kto_orthog/<row>.json updated in place
     ./kto_orthog.py served <row> ...  the row served on localhost:8000 as cb_<row>: teacher-forced prompt_logprobs of those 50 answers against the HF log-probs (mean |difference|
                                       per token <= 0.005 nats passes), added to acts/kto_orthog/<row>.json
     ./kto_orthog.py table             the SUMMARY tables of this mission (refusal rates from the records, the checks of every row), to acts/kto_orthog/table.md and rates.json
@@ -82,7 +83,7 @@ if STAGE == "served":
     sys.exit()
 
 #%% build: the base model once; each row edits the writers in place
-assert STAGE == "build", STAGE
+assert STAGE in ("build", "mech"), STAGE   # mech: the mechanical check of built rows again (acts/kto_orthog/<row>.json updated in place), no checkpoint written, no HF checks
 tok = AutoTokenizer.from_pretrained(MODEL_ID, revision=REVISION)
 PAD = tok.pad_token_id
 model = AutoModelForImageTextToText.from_pretrained(MODEL_ID, revision=REVISION, dtype=t.bfloat16, device_map="cuda")
@@ -144,10 +145,10 @@ collect = None
 def layer_hook(L: int):
     def hook(module, args, output):
         h = output[0] if isinstance(output, tuple) else output
-        if collect: collect(L, h)
-        if not hook_on or L not in hook_layers: return output
-        s = h.float() @ hook_u - hook_c[L]
-        h = h - (s[..., None] * hook_u).to(h.dtype)
+        if hook_on and L in hook_layers:
+            s = h.float() @ hook_u - hook_c[L]
+            h = h - (s[..., None] * hook_u).to(h.dtype)
+        if collect: collect(L, h)   # the layer's output as the next layer sees it: after the hook's edit when it is on
         return (h,) + tuple(output[1:]) if isinstance(output, tuple) else h
     return hook
 for L in range(64): layers[L].register_forward_hook(layer_hook(L))
@@ -307,6 +308,14 @@ for row in ARG_ROWS:
             per_layer.append(dict(layer=L, target=target[L].item(), edit_mean=e.mean().item(), edit_mean_abs_dev=dev.mean().item(), edit_max_abs_dev=dev.max().item(), base_mean=b.mean().item(), base_mean_abs=b.abs().mean().item(), base_rms=b.pow(2).mean().sqrt().item(), hook_mean_abs_dev=hook_dev.get(L), resid_norm=edit_comp["norm"][L], tol=tol, ok=bool(dev.mean().item() <= tol)))
         info["mechanical"] = dict(prompts=N_MECH, positions=int(edit_comp["comp"][0].numel()), rule="mean |component - target| <= max(3 x the hook's own mean |component - c_L| at that layer (median over hooked layers where unhooked), 0.05)", per_layer=per_layer, passed=all(p["ok"] for p in per_layer), worst=max(p["edit_mean_abs_dev"] / p["tol"] for p in per_layer))
         print(f"{green if info['mechanical']['passed'] else red}{row} mechanical check: {'PASS' if info['mechanical']['passed'] else 'FAIL'} (worst layer at {info['mechanical']['worst']:.2f} of its tolerance); mean |comp - target| by layer: " + ", ".join(f"L{p['layer']} {p['edit_mean_abs_dev']:.3f} (base |comp| {p['base_mean_abs']:.2f}, target {p['target']:+.2f})" for p in per_layer[::9]) + endc)
+    if STAGE == "mech":
+        path = OUT2 / f"{row}.json"
+        prev = json.loads(path.read_text()) if path.exists() else {}
+        prev |= dict(mechanical=info.get("mechanical"), c=info.get("c"), hook_layers=info.get("hook_layers"))
+        path.write_text(json.dumps(prev, indent=1))
+        print(f"{green}{row}: mechanical check updated in {path}{endc}")
+        apply(None, None)
+        continue
     info |= dict(bias_norms=[bias[L].norm().item() for L in range(64)], writers=sorted(W))
     out = write_checkpoint(row, direction, edits.get(direction), bias, dict(form=form, direction_sha256=info.get("direction_sha256"), c=c.tolist()))
     info["checkpoint"] = str(out)
