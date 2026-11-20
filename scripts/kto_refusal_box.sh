@@ -64,11 +64,15 @@ lora)
     adapter=$(printf "%s/step_%04d" "$PWD/$out" "$step")
     echo "LORA_TRAINED, KL-matched adapter $adapter $(date -u +%T)"
     # the base weights as cb_base with LoRA on, from the serving venv of kto_serve_setup.sh (no projection hook, no speculative decoding, the V1 runner)
-    tmux new -d -s vllm "VLLM_ALLOW_RUNTIME_LORA_UPDATING=1 VLLM_USE_FLASHINFER_SAMPLER=0 VLLM_CACHE_ROOT=$HOME/.cache/vllm_lora ~/serve/bin/vllm serve Qwen/Qwen3.8-27B --revision $REVISION --served-model-name cb_base --host 127.0.0.1 --port 8000 --max-model-len 32768 --gpu-memory-utilization 0.90 --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_xml --language-model-only --max-num-seqs 64 --enable-lora --max-lora-rank 16 2>&1 | tee ~/vllm_lora.log"
+    tmux new -d -s vllm "VLLM_ALLOW_RUNTIME_LORA_UPDATING=1 VLLM_USE_FLASHINFER_SAMPLER=0 VLLM_CACHE_ROOT=$HOME/.cache/vllm_lora ~/serve/bin/vllm serve Qwen/Qwen3.8-27B --revision $REVISION --served-model-name cb_base --host 127.0.0.1 --port 8000 --max-model-len 32768 --gpu-memory-utilization 0.90 --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_xml --language-model-only --max-num-seqs 64 --enable-lora --max-loras 2 --max-lora-rank 16 2>&1 | tee ~/vllm_lora.log"
     for _ in $(seq 240); do curl -sf -m 5 localhost:8000/v1/models | grep -q cb_base && break; tmux has-session -t vllm 2>/dev/null || break; sleep 5; done
     curl -sf -m 5 localhost:8000/v1/models | grep -q cb_base || { echo "LORA_FAILED serve, see ~/vllm_lora.log"; exit 1; }
     curl -sf -X POST localhost:8000/v1/load_lora_adapter -H 'Content-Type: application/json' -d "{\"lora_name\": \"refusal_kto_lora\", \"lora_path\": \"$adapter\"}" || { echo "LORA_FAILED load adapter"; exit 1; }
     runs refusallora_harmful refusallora_harmless refusallora_harmful_low refusallora_harmless_low refusallora_none refusallora_clean
+    final=$(ls -d $PWD/$out/step_* | sort | tail -1)
+    echo "LORA_FINAL adapter $final $(date -u +%T)"
+    curl -sf -X POST localhost:8000/v1/load_lora_adapter -H 'Content-Type: application/json' -d "{\"lora_name\": \"refusal_kto_lora_final\", \"lora_path\": \"$final\"}" || { echo "LORA_FAILED load final adapter"; exit 1; }
+    runs refusallorafinal_harmful refusallorafinal_harmless refusallorafinal_harmful_low refusallorafinal_harmless_low refusallorafinal_none refusallorafinal_clean
     stop_vllm
     py table || { echo "LORA_FAILED table"; exit 1; }
     echo "STAGE_DONE lora $(date -u +%T)";;

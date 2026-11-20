@@ -395,6 +395,7 @@ for row in ("rkto", "rktopt", "rktoall", "rkrand", "rkrandall"):
     globals().update({f"{row}_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in REFUSAL38.items()})
 # the KTO LoRA baseline on the same refusal data (LORA_ENV=refusal train_lora.py), loaded on the cb_base server; run only if no KTO direction removes refusal
 globals().update({f"refusallora_{key}": replace(cfg, lora="refusal_kto_lora") for key, cfg in REFUSAL38.items()})
+globals().update({f"refusallorafinal_{key}": replace(cfg, lora="refusal_kto_lora_final") for key, cfg in REFUSAL38.items()})   # the last adapter of the same training, past the KL match: whether the LoRA can remove refusal at all
 instances ={k: v for k, v in globals().items() if isinstance(v, EvalCfg)}
 if len(sys.argv) == 1:
     print(f"{bold}{purple}run.py{endc}  ./run.py <name> ...  {gray}the named runs, one after another{endc}")

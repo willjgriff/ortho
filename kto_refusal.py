@@ -68,7 +68,7 @@ CFGS = dict(
     rksmoke=replace(REF, steps=2),   # two steps: whether a train batch fits
 )
 TRAINED = ["rkto", "rktopt", "rktoall"]
-ROWS = ["base", "refdom", "refdomall", "refresp32", "refresp", "refdomrand", "refdomallrand", "refresp32rand", "refresprand", *CFGS, "refusallora"]
+ROWS = ["base", "refdom", "refdomall", "refresp32", "refresp", "refdomrand", "refdomallrand", "refresp32rand", "refresprand", *CFGS, "refusallora", "refusallorafinal"]
 stage = sys.argv[1] if len(sys.argv) > 1 else "list"
 names = sys.argv[2:]
 assert all(n in CFGS for n in names), f"configs are {list(CFGS)}, not {[n for n in names if n not in CFGS]}"
