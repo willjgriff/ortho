@@ -50,6 +50,10 @@ def main() -> None:
                                   answer_chars=sum(len(r["turns"][-1]["message"] or "") for r in valid) / len(valid), tokens=sum(len(r["ids"]) for r in mine) / len(mine), cut_off=sum(r["ids"][-1] != EOS for r in mine), logs=sorted({r["rollout_id"].split("/")[0] for r in mine})))
     results = {r["name"]: r for r in map(json.loads, (ACTS / "results.jsonl").open())} if (ACTS / "results.jsonl").exists() else {}
     check = json.loads((ACTS / "check.json").read_text()) if (ACTS / "check.json").exists() else {}
+    if (ACTS / "check_part1.json").exists():   # part 1's check (rkto, rktopt, rktoall, rkrand, rkrandall), kept beside this mission's: kto_refusal.py check writes only the configs it is given
+        part1 = json.loads((ACTS / "check_part1.json").read_text())
+        for key in ("first_token_kl", "mmlu", "cosines"): check[key] = {**part1.get(key, {}), **check.get(key, {})}
+        check.setdefault("mmlu_n", part1.get("mmlu_n"))
     orthog = {p.stem: json.loads(p.read_text()) for p in OUT2.glob("*.json") if p.stem not in ("rates", "table")}
     def cell(row, config, arm): return next((e for e in rates if (e["row"], e["config"], e["arm"]) == (row, config, arm)), None)
     def pct(e, key="rate", ci=True):
