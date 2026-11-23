@@ -1,0 +1,63 @@
+#!/bin/bash
+# On the GPU box, as root from /root/ortho: bash scripts/prompt_dom_box.sh <stage> [args], the runs of sweep/mission_prompt_dom.md. Prints STAGE_DONE / RUN_DONE / RUN_FAILED / *_FAILED lines; tee it to a log.
+#   rhbench_setup        a readable copy of this clone (no .git, .venv, data, acts, logs) at /home/rhbench/ortho for the unprivileged user that runs the TV and MBPP evals (model-written
+#                        commands run on the host under sandbox=local), and its own venv (uv sync as rhbench). Rerun after code changes (the copy is data for root: never executed by root).
+#   serve <row>          bash ~/serve_row.sh <row> (MAX_NUM_SEQS, MTP, PLAIN env knobs, see scripts/kto_serve_row.sh)
+#   tier1 <row> ...      per row: serve it, then the Grader runs as root (<row>_nothink, _nothink_heldout, _main, _heldout) and the TV runs as rhbench (<row>_tv_bug, <row>_tv_pos) concurrently;
+#                        row base runs nothink38, nothink38_heldout, main38, heldout38 and pdbase_tv_bug, pdbase_tv_pos. Then pull_rhbench.
+#   refusal <row> ...    per row: serve it, then the four refusal test runs (<row>_harmful, _harmless, _harmful_low, _harmless_low) as root
+#   tier2 <row> ...      per row: serve it, then as rhbench <row>_tv_bug_mt6, <row>_tv_corr and <row>_mbpp (pdbase_* for base)
+#   pull_rhbench         copy rhbench's records and logs (terminal_verifier, mbpp) into this clone's data/inspect and logs (data only)
+#   stop                 stop vLLM
+cd ~/ortho
+export PATH=$HOME/.local/bin:$PATH
+RB=/home/rhbench/ortho
+stop_vllm() { tmux kill-session -t vllm 2>/dev/null; for _ in $(seq 30); do curl -sf -m 2 localhost:8000/v1/models > /dev/null || break; sleep 2; done; sleep 5; }
+runs() { for run in "$@"; do ./run.py $run > ~/run_$run.log 2>&1 || ./run.py $run > ~/run_$run.retry.log 2>&1 || echo "RUN_FAILED $run"; echo "RUN_DONE $run $(date -u +%T)"; done; }
+rb_runs() { for run in "$@"; do rhbench-run bash -c "cd $RB && ./run.py $run" > ~/rbrun_$run.log 2>&1 || rhbench-run bash -c "cd $RB && ./run.py $run" > ~/rbrun_$run.retry.log 2>&1 || echo "RUN_FAILED $run (rhbench)"; echo "RUN_DONE $run (rhbench) $(date -u +%T)"; done; }
+serve() { curl -sf -m 5 localhost:8000/v1/models | grep -q "\"cb_$1\"" && return 0; bash ~/serve_row.sh $1 || { echo "SERVE_FAILED $1"; return 1; }; echo "SERVING $1, hooked layers: $(grep -c 'vllm_proj: hook on' ~/vllm_$1.log) $(date -u +%T)"; }
+pull() { for env in terminal_verifier mbpp; do mkdir -p data/inspect/$env logs/$env; [ -d $RB/data/inspect/$env ] && cp -n $RB/data/inspect/$env/*.jsonl data/inspect/$env/ 2>/dev/null; [ -d $RB/logs/$env ] && cp -n $RB/logs/$env/*.eval logs/$env/ 2>/dev/null; done; echo "pulled rhbench records $(date -u +%T)"; }
+case $1 in
+rhbench_setup)
+    rsync -a --delete --exclude .git --exclude .venv --exclude data --exclude acts --exclude logs --exclude figures --exclude __pycache__ --exclude '*.pyc' ~/ortho/ $RB/
+    mkdir -p $RB/data/inspect $RB/logs
+    chown -R rhbench:rhbench $RB
+    rhbench-run bash -c "cd $RB && UV_HTTP_TIMEOUT=900 uv sync" > ~/rhbench_uv_sync.log 2>&1 || { echo "RHBENCH_SETUP_FAILED uv sync, see ~/rhbench_uv_sync.log"; exit 1; }
+    rhbench-run bash -c "cd $RB && ./run.py" > /dev/null 2>&1 || { echo "RHBENCH_SETUP_FAILED run.py list"; exit 1; }
+    echo "STAGE_DONE rhbench_setup $(date -u +%T)";;
+serve) serve $2;;
+tier1)
+    shift
+    for row in "$@"; do
+        serve $row || continue
+        if [ "$row" = base ]; then g="nothink38 nothink38_heldout main38 heldout38"; tv="pdbase_tv_bug pdbase_tv_pos"; else g="${row}_nothink ${row}_nothink_heldout ${row}_main ${row}_heldout"; tv="${row}_tv_bug ${row}_tv_pos"; fi
+        rb_runs $tv &
+        pid=$!
+        runs $g
+        wait $pid
+        pull
+        echo "ROW_DONE tier1 $row $(date -u +%T)"
+    done
+    echo "STAGE_DONE tier1 $* $(date -u +%T)";;
+refusal)
+    shift
+    for row in "$@"; do
+        serve $row || continue
+        runs ${row}_harmful ${row}_harmless ${row}_harmful_low ${row}_harmless_low
+        echo "ROW_DONE refusal $row $(date -u +%T)"
+    done
+    echo "STAGE_DONE refusal $* $(date -u +%T)";;
+tier2)
+    shift
+    for row in "$@"; do
+        serve $row || continue
+        if [ "$row" = base ]; then tv="pdbase_tv_bug_mt6 pdbase_tv_corr pdbase_mbpp"; else tv="${row}_tv_bug_mt6 ${row}_tv_corr ${row}_mbpp"; fi
+        rb_runs $tv
+        pull
+        echo "ROW_DONE tier2 $row $(date -u +%T)"
+    done
+    echo "STAGE_DONE tier2 $* $(date -u +%T)";;
+pull_rhbench) pull;;
+stop) stop_vllm; echo "STAGE_DONE stop";;
+*) sed -n 2,12p "$0"; exit 1;;
+esac

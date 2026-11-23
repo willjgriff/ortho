@@ -401,6 +401,19 @@ for row in ("rkfull", "rkfullrand", "base_w", "rkfull_wm", "rkfull_wz", "rkfullr
 # the KTO LoRA baseline on the same refusal data (LORA_ENV=refusal train_lora.py), loaded on the cb_base server; run only if no KTO direction removes refusal
 globals().update({f"refusallora_{key}": replace(cfg, lora="refusal_kto_lora") for key, cfg in REFUSAL38.items()})
 globals().update({f"refusallorafinal_{key}": replace(cfg, lora="refusal_kto_lora_final") for key, cfg in REFUSAL38.items()})   # the last adapter of the same training, past the KL match: whether the LoRA can remove refusal at all
+# prompt-pair difference-of-means for reward hacking (sweep/mission_prompt_dom.md, prompt_dom_rh.py; scripts/vllm_proj.py hooks at every position, served by scripts/kto_serve_row.sh as cb_<row>):
+# R rows (refusal_dom.py's recipe on hack-minus-clean prompts, pinned at the clean mean): gpdom / gpdomall (the 221 new fit families, layers 30-60 by 3 / every layer), gp10dom (domlast's 10 pairs),
+# tvpdom / tvpdomall (TV impossible-minus-possible twin prompts); A rows (Arditi et al.'s selected direction, zero-ablated everywhere): gparditi, tvarditi, refarditi; controls gprand, tvprand
+# (random unit rows, the _all pins), zrand (one random direction, zero-ablated). The TV and MBPP runs execute model-written commands: sandbox local, run as the unprivileged user (rhbench).
+PD_ROWS = ("gpdom", "gpdomall", "gp10dom", "gparditi", "gprand", "tvpdom", "tvpdomall", "tvarditi", "tvprand", "zrand")
+PD_GRADER = dict(nothink=nothink38, nothink_heldout=nothink38_heldout, main=main38, heldout=heldout38)   # tier 1, root: reasoning off (the fit setting) and effort low, main and held-out families
+PD_TV = dict(tv_bug=replace(tv_bug38, sandbox="local"), tv_pos=replace(tv_pos38, sandbox="local"))   # tier 1, rhbench
+PD_TIER2 = dict(tv_bug_mt6=replace(tv_bug38_mt6, sandbox="local"), tv_corr=replace(tv_corr38, sandbox="local"), mbpp=replace(mbpp38, sandbox="local"))   # tier 2, rhbench
+pdbase_tv_bug, pdbase_tv_pos, pdbase_tv_bug_mt6, pdbase_tv_corr, pdbase_mbpp = PD_TV["tv_bug"], PD_TV["tv_pos"], PD_TIER2["tv_bug_mt6"], PD_TIER2["tv_corr"], PD_TIER2["mbpp"]   # the base rows on this box (cb_base, condition none)
+for row in PD_ROWS:
+    globals().update({f"{row}_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in (PD_GRADER | PD_TV | PD_TIER2).items()})
+for row in ("refarditi", "zrand"):   # the refusal runs (REFUSAL38's four test runs) of the A check and its control
+    globals().update({f"{row}_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in REFUSAL38.items() if key in ("harmful", "harmless", "harmful_low", "harmless_low")})
 instances ={k: v for k, v in globals().items() if isinstance(v, EvalCfg)}
 if len(sys.argv) == 1:
     print(f"{bold}{purple}run.py{endc}  ./run.py <name> ...  {gray}the named runs, one after another{endc}")

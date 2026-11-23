@@ -43,7 +43,7 @@ from safetensors import safe_open
 ROOT = Path(__file__).resolve().parent
 VECTORS = ROOT / "data" / "vectors"
 TASKS = {"grader": grader, "secret_number": secret_number, "impossible_bench": lcb, "terminal_verifier": terminal_verifier, "mbpp": mbpp, "hint_mc": hint_mc, "sorh": sorh, "feasigen": feasigen, "toolfail": toolfail, "odcv": odcv, "refusal": refusal}
-TASK_FIELDS = ("config", "n", "family", "system", "prompts", "split", "seed", "mode", "max_turns", "epochs")  # the EvalCfg fields that are task arguments
+TASK_FIELDS = ("config", "n", "family", "system", "prompts", "split", "seed", "mode", "max_turns", "epochs", "sandbox")  # the EvalCfg fields that are task arguments
 ENVS_COMMIT = json.loads(distribution("rhenvs").read_text("direct_url.json"))["vcs_info"]["commit_id"]  # the rhenvs commit uv installed from git
 SCALINGS = ("row", "unit", "resid_norm")
 INTERVENTION = ("lora", "add_vector", "add_layers", "add_alpha", "add_scaling", "ablate_vector", "ablate_layers", "ablate_row", "ablate_scale", "vectors")
@@ -62,6 +62,7 @@ class EvalCfg:
     mode: str | None = None  # terminal_verifier: what verifier.py holds: possible, corrupted, corrupted_negative or verifier_bug
     max_turns: int | None = None  # terminal_verifier: commands per episode
     epochs: int = 1  # terminal_verifier, mbpp, sorh, feasigen, odcv and refusal: samples per task
+    sandbox: str | None = None  # terminal_verifier, mbpp: docker (the task default) or local, Inspect's local sandbox for hosts without docker (model-written commands run on the host as the eval's user: an unprivileged one only)
     lora: str | None = None  # an adapter the server has loaded under that name
     add_vector: str | None = None  # a vector under data/vectors/<vectors>: each layer of add_layers gets its own row added to its output at every position
     add_layers: list[int] | None = None
