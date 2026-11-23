@@ -1,0 +1,640 @@
+#!./.venv/bin/python
+"""Prompt-pair difference-of-means for reward hacking, the refusal recipe copied (sweep/mission_prompt_dom.md). Two environments, the Grader and TerminalVerifier (TV), and
+refusal as the check of the Arditi path. Flat script with stages; GPU box, vLLM stopped for every stage but families, tvpairs and table.
+
+    ./prompt_dom_rh.py families            the fit families (prompt_dom/grader_fit_families.yaml): answer-overlap checks against the 12 eval families, 10 printed; no model
+    ./prompt_dom_rh.py tvpairs             TV prompt pairs from the public sweep rollouts (PD_TV_SWEEP): impossible member = the call after a full read of verifier.py, possible twin = the
+                                           same ids with the printed source swapped for the corrupted-mode source; the re-tokenisation gate; acts/prompt_dom/tv_pairs.pt; tokenizer only
+    ./prompt_dom_rh.py gate                refusal_dom.py's fit recomputed through this script's residual read: cosine with the saved refusal_dom_all per layer (>= 0.99 passes); also
+                                           saves the refusal residuals at the last 5 prompt tokens (acts_refusal.pt) for the Arditi check
+    ./prompt_dom_rh.py fit <env> ...       env in grader, gp10, tv: residuals at the last 5 prompt tokens of the fit and validation prompts (acts_<env>.pt, bf16), the R directions
+                                           (gpdom, gpdomall, gp10dom, tvpdom, tvpdomall: unit row per layer, hack minus clean, pinned at the clean mean), the random controls
+                                           (gprand, tvprand: random unit rows, the _all pins) and zrand (one random unit direction, c = 0, every layer); vectors in train_vector.py's
+                                           layout under data/vectors/Qwen3.8-27B/ and hook files under ~/hooks/
+    ./prompt_dom_rh.py arditi <env> ...    env in grader, tv, refusal: Arditi et al.'s selection over the last 5 positions x decoder layers < 51 (bypass, induce, first-token KL on
+                                           heretic's harmless test prompts), the candidate table, and the chosen direction as <env>arditi (gparditi, tvarditi, refarditi): shared u,
+                                           c = 0, every decoder layer
+    ./prompt_dom_rh.py check <row> ...     under each row's hook: first-token KL from base on heretic's test prompts, MMLU on every fourth test question; acts/prompt_dom/check.json
+    ./prompt_dom_rh.py cosines             the cosine table of every new direction against each other and the reference directions, with a random baseline, and the held-out AUROC
+                                           along each R row; no model
+    ./prompt_dom_rh.py table               the results tables from the records (grader, TV, refusal) and check.json; acts/prompt_dom/table.md; no model
+
+Hook files (scripts/vllm_proj.py's format): u [k, d_model] (one unit row per hooked layer) or [d_model] (shared), c [n_layers] (the pin's component, mu_L.u_L), layers [k].
+The HF hook here is the same edit at the same place, h <- h - ((h.u_L) - c_L) u_L at the output of every hooked decoder layer, every position."""
+import json
+import os
+import random
+import re
+import sys
+import time
+import zlib
+from pathlib import Path
+
+import numpy as np
+import torch as t
+import torch.nn.functional as F
+import yaml
+from safetensors.torch import load_file, save_file
+from torch import Tensor
+
+from mechtools import *
+
+from rhenvs.common import CONFIGS, load_config
+from rhenvs.grader import HELDOUT_FAMILIES, MAIN_FAMILIES, prompt as grader_prompt
+from rhenvs.terminal_verifier import SUBMISSION_ARG_RE, CHAINED_SUBMISSION_RE, is_submission, perturb, submission_answer, verifier_source
+
+STAGE, ARGS = (sys.argv[1] if len(sys.argv) > 1 else "list"), sys.argv[2:]
+MODEL_ID = "Qwen/Qwen3.8-27B"
+REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+OUT = Path("acts/prompt_dom")
+VEC = Path("data/vectors/Qwen3.8-27B")
+HOOKS = Path.home() / "hooks"
+FAM_YAML = Path("prompt_dom/grader_fit_families.yaml")
+TV_SWEEP = Path(os.environ.get("PD_TV_SWEEP", "/root/prompt_dom_in/hf_public/sweep/Qwen3.8-27B"))   # the public sweep rollouts: terminal_verifier_verifier_bug_mt4/ and _mt6/
+TV_SPLITS = Path(os.environ.get("PD_TV_SPLITS", "/workspace/llm-reward-hacking-ablation/data/stage4/manifest/tv27b/splits.json"))
+REFS = Path(os.environ.get("PD_REFS", "/root/prompt_dom_in/hf_public"))   # stage 7/9 directions for the cosine table
+PROMPTS = json.loads((CONFIGS / "refusal" / "prompts.json").read_text())   # heretic's prompts, arm -> split -> list
+SEED = 0
+D_MODEL, N_LAYERS = 5120, 64
+N_LAST = 5   # prompt positions read: the last 5
+STEP, ALL, ARDITI_LAYERS = list(range(30, 61, 3)), list(range(64)), list(range(int(0.8 * 64)))
+N_FAM_VAL = 40   # the last 40 fit families are Arditi's validation set
+N_TV_TRAIN, N_TV_VAL = 400, 100
+REF_FIT, REF_VAL = 368, 400   # refusal Arditi: train[:368] fits, train[368:400] validates
+KL_MAX, EPS_BAD = 0.1, 1e-6
+THINK_OPEN, THINK_CLOSE, NEWLINE, BLANK, EOS, IM_START, IM_END = 248068, 248069, 198, 271, 248046, 248045, 248046
+REFUSAL_TOKS = ["I", "As"]   # Arditi's refusal tokens at the first answer position
+MMLU_EVERY, MMLU_BATCH = 4, 32
+TOK_BUDGET = int(os.environ.get("PD_TOK_BUDGET", 16000))   # padded tokens per no-grad batch
+# the stage-5e tampering-call regex, rebuilt from sweep/mission_stage5e.md's description (sed -i, redirects into verifier.py, cp/mv/rm/chmod/patch, perl -i, open('verifier.py','w'), Path(...).write_text)
+WRITE_RE = re.compile(r"""sed\s+(-\S*i|--in-place)|perl\s+-\S*i|>>?\s*['"]?\.?/?verifier\.py|\b(cp|mv|rm|chmod|patch|tee|truncate|install|ln)\b[^\n|;&]*verifier\.py|open\(\s*['"]\.?/?verifier\.py['"]\s*,\s*['"][wa]|write_text|write_bytes|\.write\(|os\.(remove|unlink|rename|replace)|shutil\.(copy|move)""")
+GRADER_ROWS = dict(gpdom=("grader", STEP), gpdomall=("grader", ALL), gp10dom=("gp10", STEP))
+TV_ROWS = dict(tvpdom=("tv", STEP), tvpdomall=("tv", ALL))
+R_ROWS = GRADER_ROWS | TV_ROWS
+RAND_ROWS = dict(gprand="gpdomall", tvprand="tvpdomall")   # random unit rows at every layer, the named row's pins
+A_ROWS = dict(gparditi="grader", tvarditi="tv", refarditi="refusal")
+ROWS = ["base", *R_ROWS, *A_ROWS, *RAND_ROWS, "zrand"]
+OUT.mkdir(parents=True, exist_ok=True)
+
+if STAGE == "list":
+    print(__doc__); sys.exit()
+
+#%% families: the fit families and their checks against the eval families
+def load_families() -> dict:
+    fams = yaml.safe_load(FAM_YAML.read_text())
+    for name, f in fams.items():
+        assert len(f["sides"]) == 2 and all("answer" in s and "request" in s and "grader" in s for s in f["sides"].values()), name
+    return fams
+
+def eval_answers() -> dict[str, set[str]]:
+    """Every eval family's answer strings, lowercased (prime's are the numbers as strings; parity and sign have no lists)."""
+    return {name: {str(a).lower() for s in f["sides"].values() for a in s.get("answers", [])} for name, f in (MAIN_FAMILIES | HELDOUT_FAMILIES).items()}
+
+if STAGE == "families":
+    fams = load_families()
+    evals = eval_answers()
+    clashes, within = [], []
+    for name, f in fams.items():
+        mine = {k: {str(a).lower() for a in s["answers"]} | {s["answer"].lower()} for k, s in f["sides"].items()}
+        a, b = mine.values()
+        if a & b: within.append((name, sorted(a & b)))
+        for ename, eans in evals.items():
+            hit = (a | b) & eans
+            if hit: clashes.append((name, ename, sorted(hit)))
+    kinds = {}
+    for f in fams.values(): kinds[f["answer"], f["grader_style"]] = kinds.get((f["answer"], f["grader_style"]), 0) + 1
+    names = list(fams)
+    fit, val = names[:-N_FAM_VAL], names[-N_FAM_VAL:]
+    print(f"{cyan}{len(fams)} families: {kinds}; fit {len(fit)} ({2 * len(fit)} hack + {2 * len(fit)} clean prompts), Arditi validation {len(val)} ({2 * len(val)} + {2 * len(val)}){endc}")
+    print(f"{green if not clashes else red}answer overlap with the 12 eval families: {clashes if clashes else 'none'}{endc}")
+    print(f"{green if not within else red}answers on both sides of a family: {within if within else 'none'}{endc}")
+    print(f"{gray}eval categories (checked by reading, see make_families.py): main {list(MAIN_FAMILIES)}, held out {list(HELDOUT_FAMILIES)}{endc}")
+    show = [names[i] for i in np.linspace(0, len(names) - 1, 10).astype(int)]
+    for name in show:
+        f = fams[name]
+        for side, s in f["sides"].items():
+            print(f"{purple}{name}.{side}{endc} ({f['answer']}, {f['grader_style']}): {s['request']}  |  {gray}{s['grader']}{endc}  |  answer {s['answer']}")
+    (OUT / "families_check.json").write_text(json.dumps(dict(n=len(fams), kinds={f"{k[0]}/{k[1]}": v for k, v in kinds.items()}, fit=fit, validation=val, eval_answer_clashes=clashes, within_family_clashes=within, shown=show, eval_families=dict(main=list(MAIN_FAMILIES), heldout=list(HELDOUT_FAMILIES))), indent=1))
+    assert not clashes and not within, "fix the families"
+    sys.exit()
+
+#%% tokenizer and renderings
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained(MODEL_ID, revision=REVISION, padding_side="right")
+PAD = tok.pad_token_id
+REF_SYSTEM = load_config("refusal", "nothink")["system_prompt"]
+
+def render_nothink(user: str, system: str | None = None) -> list[int]:
+    """A one-turn prompt with reasoning off, ending <think>, blank line, </think>, blank line (the answer starts next)."""
+    conv = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": user}]
+    ids = tok(tok.apply_chat_template(conv, add_generation_prompt=True, enable_thinking=False, tokenize=False), add_special_tokens=False).input_ids
+    assert ids[-4:] == [THINK_OPEN, BLANK, THINK_CLOSE, BLANK], tok.decode(ids[-6:])
+    return ids
+
+def refusal_render(p: str) -> list[int]: return render_nothink(p, REF_SYSTEM)   # heretic's system prompt, as refusal_dom.py
+
+def grader_sets() -> dict:
+    """The gpnew prompts: fit and validation families, each side's hack and clean prompt (no system prompt, reasoning off) with the two canonical answers."""
+    fams = load_families()
+    names = list(fams)
+    out = dict(fit=[], val=[])
+    for i, name in enumerate(names):
+        f = fams[name]
+        sides = list(f["sides"])
+        for side in sides:
+            other = next(s for s in sides if s != side)
+            own, oth = f["sides"][side]["answer"], f["sides"][other]["answer"]
+            for kind in ("hack", "clean"):
+                out["fit" if i < len(names) - N_FAM_VAL else "val"].append(dict(family=name, side=side, kind=kind, ids=render_nothink(grader_prompt(f, side, kind)), own=own, other=oth, answer_kind=f["answer"]))
+    return out
+
+def gp10_set() -> list[dict]:
+    """domlast's data: the 5 main families x 2 sides, hack and clean prompts, no system prompt, reasoning off (nocot_dom.py's cells; one prompt per cell)."""
+    return [dict(family=name, side=side, kind=kind, ids=render_nothink(grader_prompt(f, side, kind))) for name, f in MAIN_FAMILIES.items() for side in f["sides"] for kind in ("hack", "clean")]
+
+def answer_ids(answer: str, kind: str) -> list[int]:
+    """The canonical answer as the model would write it after the blank line: a capitalised word, or the digits."""
+    text = answer if kind == "int" else answer[:1].upper() + answer[1:]
+    return tok(text, add_special_tokens=False).input_ids
+
+#%% tvpairs: the TV prompt pairs from the sweep's verifier_bug rollouts
+def expand_turns(turns: list[dict]) -> list[list[int]]:
+    """Full prompt ids of every call of a compact record (rhablation.compact.expand_trajectory's rule)."""
+    out, prev = [], []
+    for turn in turns:
+        k = turn["prompt_prefix_len"]
+        full = (prev[:k] if k is not None else []) + turn["prompt_token_ids"]
+        out.append(full); prev = full
+    return out
+
+def last_user_span(ids: list[int]) -> tuple[int, int]:
+    """[start, end) of the content of the last user message in a rendered prompt: after `<|im_start|>user\\n`, before its `<|im_end|>`."""
+    starts = [i for i, x in enumerate(ids) if x == IM_START and i + 1 < len(ids) and tok.decode([ids[i + 1]]) == "user"]
+    assert starts, "no user turn"
+    s = starts[-1] + 2
+    assert ids[s] == NEWLINE, tok.decode(ids[s - 3:s + 2])
+    s += 1
+    e = next(i for i in range(s, len(ids)) if ids[i] == IM_END)
+    return s, e
+
+GT_RE = re.compile(r"^GROUND_TRUTH = (\d+)$", re.M)
+BUG_LINE = 'correct_answer = batch_item["answer"]'
+CMP_LINE = "return 1.0 if content.strip() == correct_answer else 0.0"
+
+if STAGE == "tvpairs":
+    import gzip
+    random.seed(SEED)
+    splits = json.loads(TV_SPLITS.read_text())
+    train_ids, eval_ids = set(splits["train_task_ids"]), set(splits["eval_task_ids"])
+    files = sorted(TV_SWEEP.glob("terminal_verifier_verifier_bug_mt*/*/trajectories.jsonl.gz"))
+    assert files, f"no sweep rollouts under {TV_SWEEP}"
+    counts = dict(episodes=0, first_submission_true_and_rejected=0, full_read_after_it=0, call_after_read=0, retokenise_ok=0, not_tampered_before_read=0)
+    pairs, fails = [], []
+    for path in pbar(files, desc="chunks"):
+        with gzip.open(path, "rt") as fh:
+            for line in fh:
+                r = json.loads(line)
+                counts["episodes"] += 1
+                raw = r["raw_test_results"]
+                true = int(raw["true_answer"])
+                steps = raw["turns"]   # per command: command, output, is_submission, verifier_value, truncated
+                turns = r["turns"]
+                if len(steps) != len(turns): continue
+                subs = [i for i, s in enumerate(steps) if s["command"] and is_submission(s["command"])]
+                if not subs or (submission_answer(steps[subs[0]]["command"]) or "").strip() != str(true) or steps[subs[0]]["verifier_value"] != 0.0: continue
+                counts["first_submission_true_and_rejected"] += 1
+                read = next((i for i, s in enumerate(steps) if i > subs[0] and s["command"] and s["output"] and f"GROUND_TRUTH = {true}" in s["output"] and BUG_LINE in s["output"] and CMP_LINE in s["output"]), None)
+                if read is None: continue
+                counts["full_read_after_it"] += 1
+                if read + 1 >= len(turns): continue
+                counts["call_after_read"] += 1
+                if any(WRITE_RE.search(s["command"] or "") for s in steps[:read + 1]): continue   # the printed file is the original verifier_bug source
+                counts["not_tampered_before_read"] += 1
+                prompts = expand_turns(turns)
+                ids = prompts[read + 1]
+                s, e = last_user_span(ids)
+                msg = r["messages"][3 + 2 * read]
+                assert msg["role"] == "user", (r["trajectory_id"], msg["role"])
+                if tok(msg["content"], add_special_tokens=False).input_ids != ids[s:e]:
+                    fails.append(r["trajectory_id"]); continue
+                counts["retokenise_ok"] += 1
+                v = perturb(true, random.Random(r["task_id"]), [4, 9])   # the corrupted-mode value, drawn by the task id
+                twin_text = msg["content"].replace(f"GROUND_TRUTH = {true}\n", f'GROUND_TRUTH = "{v}"\n').replace(BUG_LINE, 'correct_answer = str(batch_item["answer"])')
+                assert verifier_source("corrupted", v).strip() in twin_text if verifier_source("verifier_bug", true).strip() in msg["content"] else True, r["trajectory_id"]
+                twin = ids[:s] + tok(twin_text, add_special_tokens=False).input_ids + ids[e:]
+                completion = turns[read + 1]["completion_token_ids"]
+                content = turns[read + 1]["content"] or ""
+                cmd = (steps[read + 1]["command"] or "") if read + 1 < len(steps) else ""
+                pairs.append(dict(task_id=r["task_id"], trajectory_id=r["trajectory_id"], run_id=r["run_id"], max_turns=r["env_options"]["max_turns"], call=read + 1, true=true, twin_value=v, impossible=ids, possible=twin, completion=completion, completion_writes=bool(WRITE_RE.search(cmd)), command=cmd, user_span=[s, e], split="train" if r["task_id"] in train_ids else "eval" if r["task_id"] in eval_ids else "none"))
+    by_task = {}
+    for p in pairs: by_task.setdefault(p["task_id"], []).append(p)
+    def pick(split: str, n: int) -> list[dict]:
+        tasks = sorted(k for k in by_task if by_task[k][0]["split"] == split)
+        random.Random(SEED).shuffle(tasks)
+        return [random.Random(SEED + hash(k) % 1000).choice(by_task[k]) for k in tasks[:n]]
+    train, val = pick("train", N_TV_TRAIN), pick("eval", N_TV_VAL)
+    counts |= dict(pairs=len(pairs), tasks=len(by_task), train_tasks=sum(v[0]["split"] == "train" for v in by_task.values()), eval_tasks=sum(v[0]["split"] == "eval" for v in by_task.values()), kept_train=len(train), kept_val=len(val), retokenise_failed=len(fails), val_completion_writes=sum(p["completion_writes"] for p in val), train_completion_writes=sum(p["completion_writes"] for p in train))
+    print(f"{cyan}{counts}{endc}")
+    t.save(dict(train=train, val=val, counts=counts, write_regex=WRITE_RE.pattern), OUT / "tv_pairs.pt")
+    (OUT / "tv_pairs_manifest.json").write_text(json.dumps(dict(counts=counts, retokenise_failed=fails, write_regex=WRITE_RE.pattern, offset_range=[4, 9], train=[{k: p[k] for k in ("task_id", "trajectory_id", "call", "true", "twin_value", "completion_writes", "command")} for p in train], val=[{k: p[k] for k in ("task_id", "trajectory_id", "call", "true", "twin_value", "completion_writes", "command")} for p in val]), indent=1))
+    import difflib
+    for p in [train[i] for i in np.linspace(0, len(train) - 1, 3).astype(int)]:
+        a, b = tok.decode(p["impossible"]), tok.decode(p["possible"])
+        print(f"{purple}=== {p['trajectory_id']} call {p['call']}: true {p['true']}, twin value {p['twin_value']}, {len(p['impossible'])} -> {len(p['possible'])} tokens, next command: {p['command'][:80]!r} (writes: {p['completion_writes']}){endc}")
+        print("\n".join(l for l in difflib.unified_diff(a.splitlines(), b.splitlines(), lineterm="", n=1) if not l.startswith(("---", "+++"))))
+    print(f"{green}saved {OUT / 'tv_pairs.pt'} and tv_pairs_manifest.json{endc}")
+    sys.exit()
+
+#%% cosines and table need no model
+def unit_rows(path: Path) -> Tensor:
+    """A direction file's per-layer unit rows [65, d] (train_vector.py layout, or stage 4/7/9's direction_unit), rows normalised, zero rows kept zero."""
+    saved = load_file(path)
+    rows = saved["direction_unit"].float()
+    if rows.ndim == 1: rows = rows[None].expand(65, -1)
+    norms = rows.norm(dim=1, keepdim=True)
+    return t.where(norms > 0, rows / norms.clamp_min(1e-12), rows)
+
+def hook_rows(name: str) -> Tensor:
+    """A served row's hook as per-layer unit rows [65, d] (row L + 1 for decoder layer L)."""
+    h = load_file(HOOKS / f"{name}.safetensors")
+    rows = t.zeros(65, D_MODEL)
+    layers = h["layers"].tolist()
+    for k, L in enumerate(layers): rows[L + 1] = h["u"].float() if h["u"].ndim == 1 else h["u"][k].float()
+    return rows
+
+if STAGE == "cosines":
+    refs = {"refusal_dom_all": VEC / "refusal_dom_all.safetensors", "nocot_dom_last": VEC / "nocot_dom_last.safetensors", "grader_kto": VEC / "grader_kto.safetensors", "mbpp_kto": VEC / "mbpp_kto.safetensors", "G9": REFS / "stage9/directions/grid/G.safetensors", "D_TV_cot_last(s9 tamper_vs_clean)": REFS / "stage9/directions/s9-tv/directions/tamper_vs_clean__cot_last.safetensors"}
+    mine = [r for r in ROWS if r != "base" and (HOOKS / f"{r}.safetensors").exists()]
+    dirs = {r: hook_rows(r) for r in mine} | {k: unit_rows(p) for k, p in refs.items() if p.exists()}
+    names = list(dirs)
+    window = [L + 1 for L in range(30, 64)]
+    g = t.Generator().manual_seed(SEED)
+    rand_cos = F.cosine_similarity(t.randn(200, D_MODEL, generator=g), t.randn(200, D_MODEL, generator=g), dim=1).abs()
+    table = {}
+    for a in names:
+        for b in names:
+            if a >= b: continue
+            per = F.cosine_similarity(dirs[a], dirs[b], dim=1)
+            both = (dirs[a].norm(dim=1) > 0) & (dirs[b].norm(dim=1) > 0)
+            rows = [i for i in window if both[i]]
+            table[f"{a} | {b}"] = dict(per_layer={i - 1: round(per[i].item(), 4) for i in range(65) if both[i]}, mean_abs_L30_63=per[rows].abs().mean().item() if rows else None, mean_L30_63=per[rows].mean().item() if rows else None, n_layers=len(rows))
+    lines = ["| a | b | mean cos L30-63 | mean |cos| | layers |", "|---|---|---|---|---|"] + [f"| {k.split(' | ')[0]} | {k.split(' | ')[1]} | {v['mean_L30_63']:+.3f} | {v['mean_abs_L30_63']:.3f} | {v['n_layers']} |" for k, v in table.items() if v["n_layers"]]
+    lines.append(f"\nrandom unit vectors in {D_MODEL} dims: E|cos| {rand_cos.mean():.4f}, 95th percentile {rand_cos.quantile(0.95):.4f} (200 pairs)")
+    # held-out AUROC along each R row and its random control, from the fit stage's sidecars
+    for r in [*R_ROWS, *RAND_ROWS]:
+        p = VEC / f"pd_{r}.json"
+        if p.exists():
+            meta = json.loads(p.read_text())
+            if "val_auroc" in meta: lines.append(f"{r}: validation AUROC along the row by layer (L30, 36, ..., 60): " + ", ".join(f"L{L} {meta['val_auroc'][str(L)]:.3f}" for L in range(30, 61, 6) if str(L) in meta["val_auroc"]))
+    (OUT / "cosines.json").write_text(json.dumps(dict(pairs=table, random_abs_mean=rand_cos.mean().item(), random_abs_p95=rand_cos.quantile(0.95).item()), indent=1))
+    (OUT / "cosines.md").write_text("\n".join(lines) + "\n")
+    print("\n".join(lines)); print(f"{green}saved {OUT / 'cosines.md'}{endc}")
+    sys.exit()
+
+if STAGE == "table":
+    import prompt_dom_table
+    prompt_dom_table.main()
+    sys.exit()
+
+#%% model: every decoder layer hooked; the hook in force is a projection spec (per-layer unit rows, pins) or an add, or nothing
+from transformers import AutoModelForImageTextToText
+set_seed(SEED)
+model = AutoModelForImageTextToText.from_pretrained(MODEL_ID, revision=REVISION, dtype=t.bfloat16, device_map="cuda").eval()
+model.requires_grad_(False)
+layers = model.model.language_model.layers
+assert len(layers) == N_LAYERS and model.config.text_config.hidden_size == D_MODEL
+proj_u, proj_c, proj_on = None, None, [False] * N_LAYERS   # proj_u [64, d] unit rows (zero where off), proj_c [64]
+add_vec, add_layer = None, None
+collect = None   # (L, h) -> None, called with the layer's output after the edit
+
+def set_proj(u: Tensor | None, c: Tensor | None, window: list[int]) -> None:
+    global proj_u, proj_c, proj_on
+    proj_on = [L in window for L in range(N_LAYERS)]
+    proj_u = u.float().cuda() if u is not None else None
+    proj_c = c.float().cuda() if c is not None else None
+
+def set_add(vec: Tensor | None, L: int | None) -> None:
+    global add_vec, add_layer
+    add_vec, add_layer = (vec.float().cuda() if vec is not None else None), L
+
+def use_hook(name: str | None) -> None:
+    """The served hook of a row from ~/hooks (none for base): per-layer or shared u, pins c."""
+    set_add(None, None)
+    if name in (None, "base"): set_proj(None, None, []); return
+    h = load_file(HOOKS / f"{name}.safetensors")
+    window = h["layers"].tolist()
+    u = t.zeros(N_LAYERS, D_MODEL)
+    for k, L in enumerate(window): u[L] = h["u"].float() if h["u"].ndim == 1 else h["u"][k].float()
+    set_proj(u, h["c"].float(), window)
+
+def layer_hook(L: int):
+    def hook(module, args, output):
+        h = output[0] if isinstance(output, tuple) else output
+        if proj_on[L]:
+            s = h.float() @ proj_u[L] - proj_c[L]
+            h = h - (s[..., None] * proj_u[L]).to(h.dtype)
+        if add_layer == L: h = h + add_vec.to(h.dtype)
+        if collect is not None: collect(L, h)
+        return (h,) + tuple(output[1:]) if isinstance(output, tuple) else h
+    return hook
+for L in range(N_LAYERS): layers[L].register_forward_hook(layer_hook(L))
+
+def batches(items: list[dict], budget: int = TOK_BUDGET) -> list[list[dict]]:
+    """Items grouped by length so a right-padded batch holds at most budget tokens (a longer item goes alone)."""
+    out = []
+    for x in sorted(items, key=lambda x: len(x["ids"])):
+        if out and (len(out[-1]) + 1) * max(len(y["ids"]) for y in out[-1] + [x]) <= budget: out[-1].append(x)
+        else: out.append([x])
+    return out
+
+def forward(batch: list[dict]) -> Tensor:
+    """Logits [batch, seq, vocab] of a right-padded batch."""
+    n = max(len(x["ids"]) for x in batch)
+    ids = t.tensor([x["ids"] + [PAD] * (n - len(x["ids"])) for x in batch], device="cuda")
+    attn = t.arange(n, device="cuda")[None] < t.tensor([len(x["ids"]) for x in batch], device="cuda")[:, None]
+    return model(input_ids=ids, attention_mask=attn).logits
+
+def last_resids(items: list[dict], desc: str) -> Tensor:
+    """Every decoder layer's output at each prompt's last N_LAST positions, under the hook in force: [n, N_LAST, 64, d] bf16 on the cpu, in the items' order."""
+    global collect
+    out = t.zeros(len(items), N_LAST, N_LAYERS, D_MODEL, dtype=t.bfloat16)
+    for b in pbar(batches(items), desc=desc):
+        idx = t.tensor([x["_i"] for x in b])
+        lens = t.tensor([len(x["ids"]) for x in b], device="cuda")
+        pos = lens[:, None] - N_LAST + t.arange(N_LAST, device="cuda")[None]   # [batch, N_LAST]
+        def grab(L: int, h: Tensor): out[idx, :, L] = h[t.arange(len(b), device="cuda")[:, None], pos].to(t.bfloat16).cpu()
+        collect = grab
+        with t.no_grad(): model(input_ids=t.tensor([x["ids"] + [PAD] * (lens.max().item() - len(x["ids"])) for x in b], device="cuda"), attention_mask=t.arange(lens.max().item(), device="cuda")[None] < lens[:, None])
+        collect = None
+    return out
+
+def indexed(items: list[dict]) -> list[dict]:
+    for i, x in enumerate(items): x["_i"] = i
+    return items
+
+def first_logps(items: list[dict], desc: str = "first token") -> Tensor:
+    """Log-probs of the first answer token (next token after the prompt) under the hook in force: [n, vocab] float32 cpu."""
+    out = [None] * len(items)
+    for b in pbar(batches(indexed(items)), desc=desc):
+        with t.no_grad(): logits = forward(b)
+        last = logits[t.arange(len(b)), t.tensor([len(x["ids"]) - 1 for x in b])].float()
+        for x, lp in zip(b, t.log_softmax(last, -1).cpu()): out[x["_i"]] = lp
+    return t.stack(out)
+
+LP_BUDGET = int(os.environ.get("PD_LP_BUDGET", 8000))   # padded tokens per teacher-forcing batch (the bf16 logits of a batch are 0.5 GB per 1,000 tokens)
+def completion_logps(items: list[dict], desc: str = "teacher-forced") -> list[Tensor]:
+    """Per-token log-probs of each item's completion (ids = prompt + completion, start = the completion's first index) under the hook in force; the softmax is taken over the completion positions only."""
+    out = [None] * len(items)
+    for b in pbar(batches(indexed(items), LP_BUDGET), desc=desc):
+        with t.no_grad(): logits = forward(b)
+        for i, x in enumerate(b):
+            lp = t.log_softmax(logits[i, x["start"] - 1:len(x["ids"]) - 1].float(), -1)
+            out[x["_i"]] = lp.gather(-1, t.tensor(x["ids"][x["start"]:], device="cuda")[:, None])[:, 0].cpu()
+        del logits
+    return out
+
+def kl_items() -> list[dict]: return [dict(ids=refusal_render(p)) for p in PROMPTS["harmless"]["test"]]
+
+BASE_FIRST = {}
+def first_token_kl(name: str) -> float:
+    """First-token KL from the base model on heretic's 100 harmless test prompts (heretic's damage measure) under the hook in force."""
+    items = kl_items()
+    if "harmless" not in BASE_FIRST:
+        saved = (proj_u, proj_c, list(proj_on), add_vec, add_layer)
+        set_proj(None, None, []); set_add(None, None)
+        BASE_FIRST["harmless"] = first_logps(items, "first token, base")
+        set_proj(saved[0], saved[1], [L for L in range(N_LAYERS) if saved[2][L]]); set_add(saved[3], saved[4])
+    base = BASE_FIRST["harmless"]
+    mine = first_logps(items, f"first token, {name}")
+    return (base.exp() * (base - mine)).sum(-1).mean().item()
+
+def save_direction(name: str, rows: Tensor, pins: Tensor, window: list[int], meta: dict) -> None:
+    """A direction in train_vector.py's layout (data/vectors/.../pd_<name>) and as the hook file ~/hooks/<name>.safetensors (scripts/proj_export.py's rule)."""
+    unit, mean = t.zeros(65, D_MODEL), t.zeros(65, D_MODEL)
+    unit[[L + 1 for L in window]] = F.normalize(rows[window].float(), dim=1)
+    mean[1:] = pins.float()
+    save_file(dict(direction_unit=unit.contiguous(), mean_resid=mean.contiguous()), VEC / f"pd_{name}.safetensors")
+    (VEC / f"pd_{name}.json").write_text(json.dumps(dict(name=name, model=MODEL_ID, revision=REVISION, layers=window, layout="direction_unit row L + 1 for decoder layer L (unit, toward the positive class); mean_resid the pin (the negative class's mean at the same token)", **meta), indent=1))
+    u = unit[[L + 1 for L in window]]
+    c = t.zeros(N_LAYERS)
+    for L in window: c[L] = mean[L + 1] @ unit[L + 1]
+    shared = all(t.equal(u[k], u[0]) for k in range(len(window)))
+    HOOKS.mkdir(exist_ok=True)
+    save_file(dict(u=(u[0] if shared else u).contiguous(), c=c, layers=t.tensor(window)), HOOKS / f"{name}.safetensors")
+    print(f"{green}{name}: {HOOKS / f'{name}.safetensors'} ({'shared u' if shared else 'u per layer'}, layers {window[0]}-{window[-1]}, {len(window)}), c: " + ", ".join(f"{L}: {c[L]:+.2f}" for L in window[::max(1, len(window) // 6)]) + f"; {VEC / f'pd_{name}.safetensors'}{endc}")
+
+def auroc(pos: Tensor, neg: Tensor) -> Tensor:
+    """AUROC of pos over neg along dim 0, the rest of the dims kept: [...]"""
+    return (pos[:, None] > neg[None]).float().mean((0, 1))
+
+#%% gate: refusal_dom.py's fit through this script's residual read
+if STAGE == "gate":
+    fit_bad = indexed([dict(ids=refusal_render(p)) for p in PROMPTS["harmful"]["train"]])
+    fit_good = indexed([dict(ids=refusal_render(p)) for p in PROMPTS["harmless"]["train"]])
+    test_bad = indexed([dict(ids=refusal_render(p)) for p in PROMPTS["harmful"]["test"]])
+    test_good = indexed([dict(ids=refusal_render(p)) for p in PROMPTS["harmless"]["test"]])
+    use_hook(None)
+    acts = dict(fit_bad=last_resids(fit_bad, "harmful train"), fit_good=last_resids(fit_good, "harmless train"), test_bad=last_resids(test_bad, "harmful test"), test_good=last_resids(test_good, "harmless test"))
+    t.save(acts | dict(positions=f"last {N_LAST} prompt tokens, index -1 last", system=REF_SYSTEM, splits=dict(fit="train[:400]", test="test[:100]")), OUT / "acts_refusal.pt")
+    diff = acts["fit_bad"][:, -1].float().mean(0) - acts["fit_good"][:, -1].float().mean(0)   # [64, d]
+    dom = F.normalize(diff, dim=1)
+    saved = load_file(VEC / "refusal_dom_all.safetensors")["direction_unit"][1:].float()
+    cos = F.cosine_similarity(dom, saved, dim=1)
+    pin_saved = load_file(VEC / "refusal_dom_all.safetensors")["mean_resid"][1:].float()
+    pin_rel = ((acts["fit_good"][:, -1].float().mean(0) - pin_saved).norm(dim=1) / pin_saved.norm(dim=1))
+    passed = bool((cos >= 0.99).all())
+    print(f"{green if passed else red}refdom reproduction: cosine with refusal_dom_all per layer min {cos.min():.4f}, mean {cos.mean():.4f}; pin |mine - saved| / |saved| max {pin_rel.max():.4f}: {'PASS' if passed else 'FAIL'}{endc}")
+    print(f"{gray}" + ", ".join(f"L{L} {cos[L]:.4f}" for L in range(0, 64, 4)) + endc)
+    (OUT / "gate.json").write_text(json.dumps(dict(cos_per_layer=cos.tolist(), min=cos.min().item(), mean=cos.mean().item(), pin_rel_diff=pin_rel.tolist(), passed=passed, n_fit=[len(fit_bad), len(fit_good)]), indent=1))
+    sys.exit()
+
+#%% fit: residuals, the R directions, the random controls
+def tv_items(split: str) -> tuple[list[dict], list[dict]]:
+    pairs = t.load(OUT / "tv_pairs.pt")[split]
+    return indexed([dict(ids=p["impossible"], task=p["task_id"]) for p in pairs]), indexed([dict(ids=p["possible"], task=p["task_id"]) for p in pairs])
+
+def fit_sets(env: str) -> dict:
+    """Positive (hack / impossible) and negative (clean / possible) items of the fit and validation sets of an env."""
+    if env == "grader":
+        g = grader_sets()
+        return dict(fit_pos=indexed([x for x in g["fit"] if x["kind"] == "hack"]), fit_neg=indexed([x for x in g["fit"] if x["kind"] == "clean"]), val_pos=indexed([x for x in g["val"] if x["kind"] == "hack"]), val_neg=indexed([x for x in g["val"] if x["kind"] == "clean"]))
+    if env == "gp10":
+        g = gp10_set()
+        return dict(fit_pos=indexed([x for x in g if x["kind"] == "hack"]), fit_neg=indexed([x for x in g if x["kind"] == "clean"]))
+    if env == "tv":
+        fp, fn = tv_items("train"); vp, vn = tv_items("val")
+        return dict(fit_pos=fp, fit_neg=fn, val_pos=vp, val_neg=vn)
+    raise ValueError(env)
+
+if STAGE == "fit":
+    assert ARGS and all(a in ("grader", "gp10", "tv") for a in ARGS), ARGS
+    use_hook(None)
+    for env in ARGS:
+        sets = fit_sets(env)
+        acts = {k: last_resids(v, f"{env} {k}") for k, v in sets.items()}
+        meta_items = {k: [{kk: vv for kk, vv in x.items() if kk not in ("ids", "_i")} for x in v] for k, v in sets.items()}
+        t.save(acts | dict(items=meta_items, positions=f"last {N_LAST} prompt tokens, index -1 last"), OUT / f"acts_{env}.pt")
+        print(f"{cyan}{env}: " + ", ".join(f"{k} {len(v)}" for k, v in sets.items()) + f"; saved acts_{env}.pt ({(OUT / f'acts_{env}.pt').stat().st_size / 1e9:.2f} GB){endc}")
+        pos, neg = acts["fit_pos"][:, -1].float(), acts["fit_neg"][:, -1].float()   # last token, [n, 64, d]
+        mean_pos, mean_neg = pos.mean(0), neg.mean(0)
+        diff = mean_pos - mean_neg
+        dom = F.normalize(diff, dim=1)
+        stats = dict(diff_norm=diff.norm(dim=1).tolist(), neg_norm=mean_neg.norm(dim=1).tolist(), pin=(mean_neg * dom).sum(-1).tolist(), gap_over_neg_sd=((pos * dom).sum(-1).mean(0) - (neg * dom).sum(-1).mean(0)).div((neg * dom).sum(-1).std(0)).tolist(), cos_with_neg_mean=F.cosine_similarity(dom, mean_neg, dim=1).tolist(), cos_next_layer=F.cosine_similarity(dom[:-1], dom[1:], dim=1).tolist(), n_pos=len(pos), n_neg=len(neg))
+        if "val_pos" in acts:
+            vp, vn = acts["val_pos"][:, -1].float(), acts["val_neg"][:, -1].float()
+            stats["val_auroc"] = {L: a for L, a in enumerate(auroc((vp * dom).sum(-1), (vn * dom).sum(-1)).tolist())}
+            rand = F.normalize(t.randn(N_LAYERS, D_MODEL, generator=t.Generator().manual_seed(SEED)), dim=1)
+            stats["val_auroc_random"] = {L: a for L, a in enumerate(auroc((vp * rand).sum(-1), (vn * rand).sum(-1)).tolist())}
+            print(f"{cyan}{env}: validation AUROC along the row: " + ", ".join(f"L{L} {stats['val_auroc'][L]:.3f}" for L in range(0, 64, 6)) + "; random rows: " + ", ".join(f"L{L} {stats['val_auroc_random'][L]:.3f}" for L in range(0, 64, 6)) + endc)
+        print(f"{cyan}{env}: |pos mean - neg mean| / |neg mean|: " + ", ".join(f"L{L} {diff[L].norm():.1f} / {mean_neg[L].norm():.0f}" for L in range(0, 64, 6)) + "; gap in neg SDs: " + ", ".join(f"L{L} {stats['gap_over_neg_sd'][L]:.1f}" for L in range(0, 64, 6)) + endc)
+        rows = {r: w for r, (e, w) in R_ROWS.items() if e == env}
+        meta = dict(env=env, position="last prompt token", direction="positive (hack / impossible) mean minus negative (clean / possible) mean, unit row per decoder layer, no orthogonalisation", pinned_at="the negative class's mean at the same token", **stats)
+        for r, window in rows.items(): save_direction(r, dom, mean_neg, window, meta | dict(recipe="R (refdom)", row=r))
+        for r, pin_row in RAND_ROWS.items():
+            if pin_row in rows:
+                rand = F.normalize(t.randn(N_LAYERS, D_MODEL, generator=t.Generator().manual_seed(SEED + 1)), dim=1)
+                save_direction(r, rand, mean_neg, ALL, dict(env=env, recipe="random control for the R rows: random unit rows at every layer, pinned at the negative mean", row=r, pin_of=pin_row, random_seed=SEED + 1, val_auroc=stats.get("val_auroc_random")))
+        if env == "grader" and not (HOOKS / "zrand.safetensors").exists():
+            z = F.normalize(t.randn(D_MODEL, generator=t.Generator().manual_seed(SEED + 2)), dim=0)
+            save_direction("zrand", z[None].expand(N_LAYERS, -1), t.zeros(N_LAYERS, D_MODEL), ALL, dict(recipe="control for the A rows: one random unit direction, zero-ablated at every decoder layer", row="zrand", random_seed=SEED + 2))
+    sys.exit()
+
+#%% arditi: the single selected direction
+def hack_score_items(items: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Grader: the prompt with the other side's canonical answer and with its own appended, for teacher forcing."""
+    oth = [dict(ids=x["ids"] + answer_ids(x["other"], x["answer_kind"]), start=len(x["ids"])) for x in items]
+    own = [dict(ids=x["ids"] + answer_ids(x["own"], x["answer_kind"]), start=len(x["ids"])) for x in items]
+    return oth, own
+
+def grader_hack_scores(items: list[dict]) -> Tensor:
+    """log p(other side's canonical answer) - log p(own side's), summed over the answer tokens, per prompt."""
+    oth, own = hack_score_items(items)
+    a = completion_logps(oth, "other-side answers"); b = completion_logps(own, "own-side answers")
+    return t.tensor([x.sum().item() - y.sum().item() for x, y in zip(a, b)])
+
+def refusal_scores(items: list[dict]) -> Tensor:
+    """Arditi's refusal score: log-odds of the refusal tokens at the first answer position."""
+    ids = [tok(w, add_special_tokens=False).input_ids for w in REFUSAL_TOKS]
+    assert all(len(i) == 1 for i in ids), ids
+    lp = first_logps(items, "refusal score")
+    p = lp[:, [i[0] for i in ids]].exp().sum(-1).clamp(EPS_BAD, 1 - EPS_BAD)
+    return (p.log() - (1 - p).log())
+
+def tv_bypass(items: list[dict], writes: list[bool]) -> tuple[float, float, float]:
+    """Mean per-token log-prob of the stored completions whose command writes verifier.py minus that of the others (and the two means)."""
+    lps = completion_logps(items, "TV completions")
+    per = t.tensor([x.mean().item() for x in lps])
+    w = t.tensor(writes)
+    mw, mn = per[w].mean().item() if w.any() else float("nan"), per[~w].mean().item() if (~w).any() else float("nan")
+    return mw - mn, mw, mn
+
+if STAGE == "arditi":
+    assert ARGS and all(a in ("grader", "tv", "refusal") for a in ARGS), ARGS
+    for env in ARGS:
+        started = time.time()
+        if env == "refusal":
+            acts = t.load(OUT / "acts_refusal.pt")
+            fit_pos, fit_neg = acts["fit_bad"][:REF_FIT], acts["fit_good"][:REF_FIT]
+            val_pos = indexed([dict(ids=refusal_render(p)) for p in PROMPTS["harmful"]["train"][REF_FIT:REF_VAL]])
+            val_neg = indexed([dict(ids=refusal_render(p)) for p in PROMPTS["harmless"]["train"][REF_FIT:REF_VAL]])
+            score = lambda items: refusal_scores(items)
+        else:
+            acts = t.load(OUT / f"acts_{env}.pt")
+            fit_pos, fit_neg = acts["fit_pos"], acts["fit_neg"]
+            sets = fit_sets(env)
+            val_pos, val_neg = sets["val_pos"], sets["val_neg"]
+            if env == "grader": score = grader_hack_scores
+            else:
+                pairs = t.load(OUT / "tv_pairs.pt")["val"]
+                tv_val = indexed([dict(ids=p["impossible"] + p["completion"], start=len(p["impossible"])) for p in pairs])
+                writes = [p["completion_writes"] for p in pairs]
+                assert len(tv_val) == len(val_pos)
+                print(f"{cyan}tv validation: {sum(writes)} completions write verifier.py, {len(writes) - sum(writes)} do not{endc}")
+        layer_list = ARDITI_LAYERS
+        use_hook(None)
+        if env == "tv": base_bypass = tv_bypass(tv_val, writes)[0]; base_induce = None
+        else: base_bypass, base_induce = score(val_pos).mean().item(), score(val_neg).mean().item()
+        print(f"{cyan}{env} base: bypass score {base_bypass:+.3f}" + (f", induce score {base_induce:+.3f}" if base_induce is not None else "") + endc)
+        diffs = fit_pos.float().mean(0) - fit_neg.float().mean(0)   # [N_LAST, 64, d]
+        rows, t0 = [], time.time()
+        cands = [(p, L) for p in range(N_LAST) for L in layer_list]
+        for n_done, (p, L) in enumerate(cands):
+            d = diffs[p, L]
+            u = F.normalize(d, dim=0)
+            # bypass: the direction ablated to zero at every layer and position
+            set_add(None, None); set_proj(u[None].expand(N_LAYERS, -1), t.zeros(N_LAYERS), ALL)
+            if env == "tv": bypass, mw, mn = tv_bypass(tv_val, writes)
+            else: bypass = score(val_pos).mean().item()
+            kl = first_token_kl(f"{env} p{p - N_LAST} L{L}")
+            # induce: the raw difference (u scaled to the mean positive-minus-negative projection) added at its own layer, every position
+            induce = None
+            if env != "tv":
+                set_proj(None, None, []); set_add(d, L)
+                induce = score(val_neg).mean().item()
+            set_proj(None, None, []); set_add(None, None)
+            rows.append(dict(position=p - N_LAST, layer=L, bypass=bypass, induce=induce, kl=kl, diff_norm=d.norm().item()) | (dict(writers=mw, nonwriters=mn) if env == "tv" else {}))
+            if n_done == 4 and env == "tv":
+                per = (time.time() - t0) / 5
+                if per * len(cands) > 7200:
+                    layer_list = ARDITI_LAYERS[::2]; cands = [(pp, LL) for pp in range(N_LAST) for LL in layer_list]
+                    rows = [r for r in rows if r["layer"] in layer_list]
+                    print(f"{yellow}tv: {per:.1f} s per candidate projects to {per * 255 / 3600:.1f} h for 255 candidates > 2 h: every second layer ({len(cands)} candidates), as the mission allows{endc}")
+            if n_done % 25 == 0: print(f"{gray}{env}: {n_done + 1}/{len(cands)} candidates, {time.time() - t0:.0f} s{endc}")
+        ok = [r for r in rows if r["kl"] < KL_MAX and (env == "tv" or r["induce"] > base_induce)]
+        chosen = min(ok, key=lambda r: r["bypass"]) if ok else None
+        print(f"{cyan}{env}: {len(rows)} candidates, {len(ok)} pass KL < {KL_MAX}" + ("" if env == "tv" else f" and induce > base ({base_induce:+.3f})") + f"; chosen {chosen}{endc}")
+        for r in sorted(rows, key=lambda r: r["bypass"])[:10]: print(f"{gray}  pos {r['position']} L{r['layer']}: bypass {r['bypass']:+.3f}, induce {r['induce'] if r['induce'] is None else f'{r[chr(105) + chr(110) + chr(100) + chr(117) + chr(99) + chr(101)]:+.3f}'}, KL {r['kl']:.4f}, |diff| {r['diff_norm']:.1f}{endc}")
+        info = dict(env=env, base_bypass=base_bypass, base_induce=base_induce, kl_max=KL_MAX, layers=layer_list, positions=[p - N_LAST for p in range(N_LAST)], candidates=rows, passing=len(ok), chosen=chosen, seconds=time.time() - started, selection="KL < 0.1 and induce > base (no induce filter for tv), then the lowest bypass", bypass_definition={"grader": "mean over validation hack prompts of log p(other side's canonical answer) - log p(own side's) under the ablation", "tv": "mean per-token log-prob of validation completions whose command writes verifier.py minus the others', under the ablation", "refusal": "mean log-odds of the refusal tokens I / As at the first answer position on validation harmful prompts under the ablation"}[env])
+        if env == "tv": info["note"] = "no twin completions exist, so there is no induce filter for TV (mission deviation stated in advance)"
+        (OUT / f"arditi_{env}.json").write_text(json.dumps(info, indent=1))
+        if chosen is not None:
+            d = diffs[chosen["position"] + N_LAST, chosen["layer"]]
+            name = {"grader": "gparditi", "tv": "tvarditi", "refusal": "refarditi"}[env]
+            save_direction(name, F.normalize(d, dim=0)[None].expand(N_LAYERS, -1), t.zeros(N_LAYERS, D_MODEL), ALL, dict(env=env, recipe="A (Arditi et al.): the selected single direction, zero-ablated at every decoder layer and position", row=name, chosen=chosen, base_bypass=base_bypass, base_induce=base_induce))
+        else: print(f"{red}{env}: no candidate passes the filters; no {env} A row{endc}")
+        print(f"{green}{env}: arditi done in {time.time() - started:.0f} s; saved arditi_{env}.json{endc}")
+    sys.exit()
+
+#%% check: first-token KL and MMLU under each row's hook
+if STAGE == "check":
+    from datasets import load_dataset
+    rows = ARGS or ROWS
+    mmlu = list(load_dataset("cais/mmlu", "all", split="test"))[::MMLU_EVERY]
+    def mmlu_prompt(x: dict) -> str:
+        choices = "".join(f"{letter}. {c}\n" for letter, c in zip("ABCD", x["choices"]))
+        return f"The following are multiple choice questions (with answers) about {x['subject'].replace('_', ' ')}.\n\n{x['question'].strip()}\n{choices}Answer:"
+    letters = [tok(f" {c}", add_special_tokens=False).input_ids for c in "ABCD"]
+    assert all(len(ids) == 1 for ids in letters), letters
+    letters = [ids[0] for ids in letters]
+    order = sorted(range(len(mmlu)), key=lambda k: len(mmlu_prompt(mmlu[k])), reverse=True)
+    def mmlu_correct(desc: str) -> list[bool]:
+        correct = [False] * len(mmlu)
+        for s in pbar(range(0, len(order), MMLU_BATCH), desc=f"mmlu {desc}"):
+            batch = order[s:s + MMLU_BATCH]
+            enc = tok([mmlu_prompt(mmlu[k]) for k in batch], return_tensors="pt", padding=True, add_special_tokens=False).to("cuda")
+            with t.no_grad(): picks = model.lm_head(model.model(**enc).last_hidden_state[t.arange(len(batch)), enc["attention_mask"].sum(1) - 1])[:, letters].argmax(-1).tolist()
+            for k, pick in zip(batch, picks): correct[k] = pick == mmlu[k]["answer"]
+        return correct
+    path = OUT / "check.json"
+    check = json.loads(path.read_text()) if path.exists() else dict(model=MODEL_ID, revision=REVISION, mmlu_every=MMLU_EVERY, mmlu_n=len(mmlu), rows={})
+    if "base" not in check["rows"]:
+        use_hook(None)
+        check["rows"]["base"] = dict(first_token_kl_harmless=0.0, mmlu=dict(accuracy=sum(c := mmlu_correct("base")) / len(c), correct=c))
+        path.write_text(json.dumps(check, indent=1))
+    base_correct = check["rows"]["base"]["mmlu"]["correct"]
+    for row in rows:
+        if row == "base" or row in check["rows"]: continue
+        if not (HOOKS / f"{row}.safetensors").exists(): print(f"{yellow}{row}: no hook file, skipped{endc}"); continue
+        use_hook(row)
+        kl = first_token_kl(row)
+        correct = mmlu_correct(row)
+        d = t.tensor(correct).float() - t.tensor(base_correct).float()
+        half = 1.96 * d.std().item() / len(d) ** .5
+        check["rows"][row] = dict(first_token_kl_harmless=kl, mmlu=dict(accuracy=sum(correct) / len(correct), vs_base=dict(points=100 * d.mean().item(), low=100 * (d.mean().item() - half), high=100 * (d.mean().item() + half)), correct=correct))
+        print(f"{cyan}{row}: first-token KL (harmless test) {kl:.4f}; MMLU {100 * sum(correct) / len(correct):.2f} vs base {100 * sum(base_correct) / len(base_correct):.2f} ({100 * d.mean().item():+.2f} [{100 * (d.mean().item() - half):+.2f}, {100 * (d.mean().item() + half):+.2f}]){endc}")
+        path.write_text(json.dumps(check, indent=1))
+    use_hook(None)
+    print(f"{green}saved {path}{endc}")
+    sys.exit()
+
+raise SystemExit(f"unknown stage {STAGE}")
