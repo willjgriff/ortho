@@ -57,6 +57,24 @@ tier2)
         echo "ROW_DONE tier2 $row $(date -u +%T)"
     done
     echo "STAGE_DONE tier2 $* $(date -u +%T)";;
+phase0)   # serving settings: gprand under the final settings (MTP k=3, max-num-seqs 96): KV cache, acceptance, a short TV + Grader workload; then the equivalence gate against plain settings
+    stop_vllm
+    serve gprand || { echo "PHASE0_FAILED serve final"; exit 1; }
+    grep -E "KV cache size|Maximum concurrency|GPU KV cache|num_gpu_blocks|speculative|Speculative" ~/vllm_gprand.log | head -8
+    t0=$(date +%s)
+    rhbench-run bash -c "cd $RB && ./run.py pd0_tv" > ~/rbrun_pd0_tv.log 2>&1 &
+    pid=$!
+    ./run.py pd0_grader > ~/run_pd0_grader.log 2>&1 || echo "RUN_FAILED pd0_grader"
+    wait $pid || echo "RUN_FAILED pd0_tv"
+    echo "PHASE0 workload (pd0_tv 16 grids mt4 as rhbench + pd0_grader n=8 as root) wall $(( $(date +%s) - t0 )) s $(date -u +%T)"
+    curl -s localhost:8000/metrics | grep -E "^vllm:(spec_decode_num_(accepted|draft)_tokens_total|spec_decode_num_drafts_total|kv_cache_usage_perc|num_preemptions_total|prefix_cache_(hits|queries)_total)" | sed 's/{[^}]*}//'
+    .venv/bin/python scripts/prompt_dom_served_check.py score cb_gprand final || echo "PHASE0_FAILED score final"
+    stop_vllm
+    PLAIN=1 serve gprand || { echo "PHASE0_FAILED serve plain"; exit 1; }
+    .venv/bin/python scripts/prompt_dom_served_check.py score cb_gprand plain || echo "PHASE0_FAILED score plain"
+    .venv/bin/python scripts/prompt_dom_served_check.py compare final plain
+    stop_vllm
+    echo "STAGE_DONE phase0 $(date -u +%T)";;
 pull_rhbench) pull;;
 stop) stop_vllm; echo "STAGE_DONE stop";;
 *) sed -n 2,12p "$0"; exit 1;;
