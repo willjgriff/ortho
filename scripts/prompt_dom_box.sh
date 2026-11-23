@@ -25,6 +25,9 @@ rhbench_setup)
     rhbench-run bash -c "cd $RB && UV_HTTP_TIMEOUT=900 uv sync" > ~/rhbench_uv_sync.log 2>&1 || { echo "RHBENCH_SETUP_FAILED uv sync, see ~/rhbench_uv_sync.log"; exit 1; }
     rhbench-run bash -c "cd $RB && ./run.py" > /dev/null 2>&1 || { echo "RHBENCH_SETUP_FAILED run.py list"; exit 1; }
     echo "STAGE_DONE rhbench_setup $(date -u +%T)";;
+rhbench_sync)   # the code copy refreshed after an edit (no uv sync)
+    rsync -a --delete --exclude .git --exclude .venv --exclude data --exclude acts --exclude logs --exclude figures --exclude __pycache__ --exclude '*.pyc' ~/ortho/ $RB/
+    chown -R rhbench:rhbench $RB; echo "STAGE_DONE rhbench_sync $(date -u +%T)";;
 serve) serve $2;;
 tier1)
     shift
