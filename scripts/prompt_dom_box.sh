@@ -55,7 +55,10 @@ tier2)
     for row in "$@"; do
         serve $row || continue
         if [ "$row" = base ]; then tv="pdbase_tv_bug_mt6 pdbase_tv_corr pdbase_mbpp"; else tv="${row}_tv_bug_mt6 ${row}_tv_corr ${row}_mbpp"; fi
+        /root/lmeval/bin/python scripts/prompt_dom_lmeval.py cb_$row ${LMEVAL_LIMIT:-500} > ~/lmeval_$row.log 2>&1 &   # GSM8K (cot zero-shot) + IFEval as root (regex scoring, no model output executed), concurrent with the rhbench runs
+        lpid=$!
         rb_runs $tv
+        wait $lpid && echo "RUN_DONE lmeval $row $(date -u +%T)" || echo "RUN_FAILED lmeval $row (see ~/lmeval_$row.log)"
         pull
         echo "ROW_DONE tier2 $row $(date -u +%T)"
     done
