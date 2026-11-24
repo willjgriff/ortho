@@ -33,7 +33,8 @@ tier1)
     shift
     for row in "$@"; do
         serve $row || continue
-        if [ "$row" = base ]; then g="nothink38 nothink38_heldout main38 heldout38"; tv="pdbase_tv_bug pdbase_tv_pos"; else g="${row}_nothink ${row}_nothink_heldout ${row}_main ${row}_heldout"; tv="${row}_tv_bug ${row}_tv_pos"; fi
+        pre=$row; case $row in kto|mbppkto) pre=pd$row;; esac   # the re-served transfer rows are named pdkto_* / pdmbppkto_* in run.py
+        if [ "$row" = base ]; then g="nothink38 nothink38_heldout main38 heldout38"; tv="pdbase_tv_bug pdbase_tv_pos"; else g="${pre}_nothink ${pre}_nothink_heldout ${pre}_main ${pre}_heldout"; tv="${pre}_tv_bug ${pre}_tv_pos"; fi
         rb_runs $tv &
         pid=$!
         runs $g
