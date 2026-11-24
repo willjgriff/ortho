@@ -405,8 +405,8 @@ globals().update({f"refusallorafinal_{key}": replace(cfg, lora="refusal_kto_lora
 # R rows (refusal_dom.py's recipe on hack-minus-clean prompts, pinned at the clean mean): gpdom / gpdomall (the 221 new fit families, layers 30-60 by 3 / every layer), gp10dom (domlast's 10 pairs),
 # tvpdom / tvpdomall (TV impossible-minus-possible twin prompts); A rows (Arditi et al.'s selected direction, zero-ablated everywhere): gparditi, tvarditi, refarditi; controls gprand, tvprand
 # (random unit rows, the _all pins), zrand (one random direction, zero-ablated). The TV and MBPP runs execute model-written commands: sandbox local, run as the unprivileged user (rhbench).
-pd0_tv = replace(tv_bug38, n=16, sandbox="local")   # phase 0 (serving settings): a short TV + Grader workload against the served row, rhbench and root concurrently
-pd0_grader = replace(main38, n=8)
+pd0_tv = replace(tv_bug38, n=16, sandbox="local", model="vllm/cb_gprand")   # phase 0 (serving settings): a short TV + Grader workload against the served control row gprand, rhbench and root concurrently
+pd0_grader = replace(main38, n=8, model="vllm/cb_gprand")
 PD_ROWS = ("gpdom", "gpdomall", "gp10dom", "gparditi", "gprand", "tvpdom", "tvpdomall", "tvarditi", "tvprand", "zrand")
 PD_GRADER = dict(nothink=nothink38, nothink_heldout=nothink38_heldout, main=main38, heldout=heldout38)   # tier 1, root: reasoning off (the fit setting) and effort low, main and held-out families
 PD_TV = dict(tv_bug=replace(tv_bug38, sandbox="local"), tv_pos=replace(tv_pos38, sandbox="local"))   # tier 1, rhbench

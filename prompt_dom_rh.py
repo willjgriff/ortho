@@ -599,6 +599,21 @@ if STAGE == "arditi":
         print(f"{green}{env}: arditi done in {time.time() - started:.0f} s; saved arditi_{env}.json{endc}")
     sys.exit()
 
+#%% servedref: the HF per-token log-probs of the served check's 30 rollouts under a row's hook (the truth both server settings are compared with)
+if STAGE == "servedref":
+    sys.path.insert(0, "scripts")
+    saved_argv, sys.argv = sys.argv, ["prompt_dom_served_check.py", "list"]
+    exec(open("scripts/prompt_dom_served_check.py").read().split("if sys.argv[1] ==")[0])   # items(), OUT, FLOOR
+    sys.argv = saved_argv
+    for row in ARGS or ["gprand"]:
+        use_hook(row)
+        xs = items()
+        lps = completion_logps([dict(ids=x["ids"], start=1, _i=i) for i, x in enumerate(xs)], f"HF {row}")
+        (OUT / f"served_hf_{row}.json").write_text(json.dumps(dict(model=f"hf_{row}", items=[dict(key=x["key"], env=x["env"], n=len(x["ids"])) for x in xs], logps=[lp.tolist() for lp in lps], metrics={})))
+        print(f"{green}{row}: HF reference of {len(xs)} rollouts saved to served_hf_{row}.json{endc}")
+    use_hook(None)
+    sys.exit()
+
 #%% check: first-token KL and MMLU under each row's hook
 if STAGE == "check":
     from datasets import load_dataset
