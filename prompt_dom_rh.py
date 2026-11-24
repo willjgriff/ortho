@@ -558,7 +558,10 @@ if STAGE == "arditi":
         diffs = fit_pos.float().mean(0) - fit_neg.float().mean(0)   # [N_LAST, 64, d]
         rows, t0 = [], time.time()
         cands = [(p, L) for p in range(N_LAST) for L in layer_list]
-        for n_done, (p, L) in enumerate(cands):
+        n_done = -1
+        while n_done + 1 < len(cands):   # an index loop: the candidate list may be halved after the fifth candidate (a for over the list would keep iterating the old one)
+            n_done += 1
+            p, L = cands[n_done]
             d = diffs[p, L]
             u = F.normalize(d, dim=0)
             # bypass: the direction ablated to zero at every layer and position
@@ -578,6 +581,7 @@ if STAGE == "arditi":
                 if per * len(cands) > 7200:
                     layer_list = ARDITI_LAYERS[::2]; cands = [(pp, LL) for pp in range(N_LAST) for LL in layer_list]
                     rows = [r for r in rows if r["layer"] in layer_list]
+                    n_done = len(rows) - 1   # the scored even-layer candidates are the first entries of the new list
                     print(f"{yellow}tv: {per:.1f} s per candidate projects to {per * 255 / 3600:.1f} h for 255 candidates > 2 h: every second layer ({len(cands)} candidates), as the mission allows{endc}")
             if n_done % 25 == 0: print(f"{gray}{env}: {n_done + 1}/{len(cands)} candidates, {time.time() - t0:.0f} s{endc}")
         ok = [r for r in rows if r["kl"] < KL_MAX and (env == "tv" or r["induce"] > base_induce)]
