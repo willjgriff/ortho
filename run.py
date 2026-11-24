@@ -416,6 +416,9 @@ for row in PD_ROWS:
     globals().update({f"{row}_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in (PD_GRADER | PD_TV | PD_TIER2).items()})
 for row in ("refarditi", "zrand"):   # the refusal runs (REFUSAL38's four test runs) of the A check and its control
     globals().update({f"{row}_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in REFUSAL38.items() if key in ("harmful", "harmless", "harmful_low", "harmless_low")})
+# the protocol's transfer rows re-served on this box (mission: if > 3 h remain after tier 2): grader_kto as cb_kto and mbpp_kto as cb_mbppkto (scripts/proj_export.py ... gen_only, scripts/kto_serve_row.sh), tier 1 on them
+for row in ("kto", "mbppkto"):
+    globals().update({f"pd{row}_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in (PD_GRADER | PD_TV).items()})
 instances ={k: v for k, v in globals().items() if isinstance(v, EvalCfg)}
 if len(sys.argv) == 1:
     print(f"{bold}{purple}run.py{endc}  ./run.py <name> ...  {gray}the named runs, one after another{endc}")
