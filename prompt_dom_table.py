@@ -123,6 +123,18 @@ def main() -> None:
         for row, c in check["rows"].items():
             vb = c["mmlu"].get("vs_base")
             lines.append(f"| {row} | {100 * c['mmlu']['accuracy']:.2f} | " + (f"{vb['points']:+.2f} [{vb['low']:+.2f}, {vb['high']:+.2f}]" if vb else "-") + f" | {c['first_token_kl_harmless']:.4f} |")
+    # tier 2: GSM8K (cot zero-shot, reasoning off) and IFEval through lm-eval, first 500 items of each (scripts/prompt_dom_lmeval.py -> acts/prompt_dom/lmeval/cb_<row>.json)
+    lm = {row: json.loads((OUT / "lmeval" / f"cb_{row}.json").read_text()) for row in ROWS if (OUT / "lmeval" / f"cb_{row}.json").exists()}
+    if lm:
+        lines += ["", "## GSM8K and IFEval (lm-eval, local-chat-completions, reasoning off, greedy, the first 500 items of each task) [Wilson 95%]", "", "| row | GSM8K flexible-extract | GSM8K strict-match | IFEval prompt-level strict | IFEval prompt-level loose | IFEval inst-level strict | n |", "|---|---|---|---|---|---|---|"]
+        for row, d in lm.items():
+            g, f = d["results"].get("gsm8k_cot_zeroshot", {}), d["results"].get("ifeval", {})
+            ndocs = lambda t: len({x["doc_id"] for x in d.get("samples", {}).get(t, [])}) or d["n_samples"].get(t, 0)   # lm-eval lists a GSM8K doc once per filter
+            ng, nf = ndocs("gsm8k_cot_zeroshot"), ndocs("ifeval")
+            acc = lambda r, key, n: rate(round(r[key] * n), n) if key in r and n else "-"
+            cells = [acc(g, "exact_match,flexible-extract", ng), acc(g, "exact_match,strict-match", ng), acc(f, "prompt_level_strict_acc,none", nf), acc(f, "prompt_level_loose_acc,none", nf), (f"{100 * f['inst_level_strict_acc,none']:.1f}%" if "inst_level_strict_acc,none" in f else "-")]
+            rates[f"lmeval/{row}"] = dict(gsm8k=g, ifeval=f, n=dict(gsm8k=ng, ifeval=nf))
+            lines.append(f"| {row} | " + " | ".join(cells) + f" | {ng} / {nf} |")
     # gates and data
     for name, title in [("gate.json", "refdom reproduction gate"), ("families_check.json", "families check"), ("tv_pairs_manifest.json", "TV pairs")]:
         p = OUT / name
