@@ -78,6 +78,26 @@ phase0)   # serving settings: gprand under the final settings (MTP k=3, max-num-
     .venv/bin/python scripts/prompt_dom_served_check.py compare final plain
     stop_vllm
     echo "STAGE_DONE phase0 $(date -u +%T)";;
+phase0b)   # after the gate failed with MTP: gprand without MTP at max-num-seqs 96 scored against plain and against the HF reference (prompt_dom_rh.py servedref gprand), then the workload under the settings given in SETTINGS (e.g. SETTINGS="MTP=0")
+    stop_vllm
+    MTP=0 serve gprand || { echo "PHASE0B_FAILED serve nomtp"; exit 1; }
+    .venv/bin/python scripts/prompt_dom_served_check.py score cb_gprand nomtp || echo "PHASE0B_FAILED score nomtp"
+    for pair in "nomtp plain" "final plain" "final hf_gprand" "plain hf_gprand" "nomtp hf_gprand"; do .venv/bin/python scripts/prompt_dom_served_check.py compare $pair; done
+    stop_vllm
+    echo "STAGE_DONE phase0b $(date -u +%T)";;
+phase0_workload)   # the short TV + Grader workload under the current environment's serving knobs (MTP, MAX_NUM_SEQS): KV cache, acceptance, wall time
+    stop_vllm
+    serve gprand || { echo "PHASE0W_FAILED serve"; exit 1; }
+    grep -E "GPU KV cache size|Maximum concurrency" ~/vllm_gprand.log | head -2
+    t0=$(date +%s)
+    rhbench-run bash -c "cd $RB && ./run.py pd0_tv" > ~/rbrun_pd0_tv.log 2>&1 &
+    pid=$!
+    ./run.py pd0_grader > ~/run_pd0_grader.log 2>&1 || echo "RUN_FAILED pd0_grader"
+    wait $pid || echo "RUN_FAILED pd0_tv"
+    echo "PHASE0 workload (pd0_tv 16 grids mt4 as rhbench + pd0_grader n=8 as root) wall $(( $(date +%s) - t0 )) s $(date -u +%T)"
+    curl -s localhost:8000/metrics | grep -E "^vllm:(spec_decode_num_(accepted|draft)_tokens_total|spec_decode_num_drafts_total|kv_cache_usage_perc|num_preemptions_total|prefix_cache_(hits|queries)_total|generation_tokens_total|prompt_tokens_total)" | sed 's/{[^}]*}//'
+    grep -hoE "Running: [0-9]+ reqs, Waiting: [0-9]+ reqs, GPU KV cache usage: [0-9.]+%" ~/vllm_gprand.log | sort -t: -k4 -n | tail -3
+    echo "STAGE_DONE phase0_workload $(date -u +%T)";;
 pull_rhbench) pull;;
 stop) stop_vllm; echo "STAGE_DONE stop";;
 *) sed -n 2,12p "$0"; exit 1;;
