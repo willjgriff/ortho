@@ -82,7 +82,11 @@ phase0b)   # after the gate failed with MTP: gprand without MTP at max-num-seqs 
     stop_vllm
     MTP=0 serve gprand || { echo "PHASE0B_FAILED serve nomtp"; exit 1; }
     .venv/bin/python scripts/prompt_dom_served_check.py score cb_gprand nomtp || echo "PHASE0B_FAILED score nomtp"
-    for pair in "nomtp plain" "final plain" "final hf_gprand" "plain hf_gprand" "nomtp hf_gprand"; do .venv/bin/python scripts/prompt_dom_served_check.py compare $pair; done
+    .venv/bin/python scripts/prompt_dom_served_check.py score cb_gprand nomtp2 || echo "PHASE0B_FAILED score nomtp2"   # the same server again: run-to-run noise
+    stop_vllm
+    PLAIN=1 serve gprand || { echo "PHASE0B_FAILED serve plain"; exit 1; }
+    .venv/bin/python scripts/prompt_dom_served_check.py score cb_gprand plain2 || echo "PHASE0B_FAILED score plain2"
+    for pair in "nomtp nomtp2" "plain plain2" "nomtp plain" "final plain" "final hf_gprand" "plain hf_gprand" "nomtp hf_gprand" "plain2 hf_gprand"; do .venv/bin/python scripts/prompt_dom_served_check.py compare $pair; done
     stop_vllm
     echo "STAGE_DONE phase0b $(date -u +%T)";;
 phase0_workload)   # the short TV + Grader workload under the current environment's serving knobs (MTP, MAX_NUM_SEQS): KV cache, acceptance, wall time
