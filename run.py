@@ -419,6 +419,40 @@ for row in ("refarditi", "zrand"):   # the refusal runs (REFUSAL38's four test r
 # the protocol's transfer rows re-served on this box (mission: if > 3 h remain after tier 2): grader_kto as cb_kto and mbpp_kto as cb_mbppkto (scripts/proj_export.py ... gen_only, scripts/kto_serve_row.sh), tier 1 on them
 for row in ("kto", "mbppkto"):
     globals().update({f"pd{row}_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in (PD_GRADER | PD_TV).items()})
+# second model (sweep/mission_second_model.md; second_model.py; SM_MODEL picks the tag, default gemma4_31b): the stage-11 evals on the second model's rh-envs configs <tag>_on / <tag>_off,
+# every row served as cb_<row> by scripts/second_model_serve_row.sh (base = a zero hook on the same patched forward). Grader: thinking off n=256 per side per family (nothink38's size),
+# on n=128 (main38's); clean prompts are the pilot's no-incentive control. TV (rhbench, sandbox local): verifier_bug mt4 on 200 grids of the seed pool, possible mt6 64 (tv_pos38's),
+# off mt4 100; the pair collection is verifier_bug mt6 on the source_eval pool (pool_size 1534, seed 0: the sweep's task ids) in chunks of 200 by offset, filtered to the stage-4 train
+# split afterwards. Refusal: heretic's 100 test prompts per arm, off and on. Rows: <row>_sm_<key> for the hooked rows, sm_<key> for base.
+import os
+SM = os.environ.get("SM_MODEL", "gemma4_31b")
+sm_g_off_main = EvalCfg(env="grader", config=f"{SM}_off", family="all", system="none", prompts="hack", n=256, model="vllm/cb_base")
+sm_g_off_clean = replace(sm_g_off_main, prompts="clean")
+sm_g_off_heldout = replace(sm_g_off_main, family="heldout")
+sm_g_on_main = replace(sm_g_off_main, config=f"{SM}_on", n=128)
+sm_g_on_clean = replace(sm_g_on_main, prompts="clean")
+sm_g_on_heldout = replace(sm_g_on_main, family="heldout")
+sm_tv_on_bug = EvalCfg(env="terminal_verifier", config=f"{SM}_on", mode="verifier_bug", max_turns=4, n=200, seed=0, sandbox="local", model="vllm/cb_base")
+sm_tv_on_pos = replace(sm_tv_on_bug, mode="possible", max_turns=6, n=64)
+sm_tv_on_bug_mt6 = replace(sm_tv_on_bug, max_turns=6, n=100)
+sm_tv_off_bug = replace(sm_tv_on_bug, config=f"{SM}_off", n=100)
+sm_tv_off_pos = replace(sm_tv_on_pos, config=f"{SM}_off")
+sm_tv_collect = replace(sm_tv_on_bug, max_turns=6, n=200, pool="source_eval", pool_size=1534, offset=0)   # the on-policy TV pairs' episodes; chunk k covers pool offsets 200k..200k+199
+for k in range(8): globals()[f"sm_tv_collect_c{k}"] = replace(sm_tv_collect, offset=200 * k, n=200 if k < 7 else 134)
+sm_ref_off_harmful = EvalCfg(env="refusal", config=f"{SM}_off", prompts="harmful", model="vllm/cb_base")
+sm_ref_off_harmless = replace(sm_ref_off_harmful, prompts="harmless")
+sm_ref_on_harmful = replace(sm_ref_off_harmful, config=f"{SM}_on")
+sm_ref_on_harmless = replace(sm_ref_on_harmful, prompts="harmless")
+sm_smoke_g = replace(sm_g_on_main, n=2)
+sm_smoke_g_off = replace(sm_g_off_main, n=2)
+sm_smoke_tv = replace(sm_tv_on_bug, n=4)
+sm_smoke_ref = replace(sm_ref_on_harmful, n=4)
+sm_smoke_ref_off = replace(sm_ref_off_harmful, n=4)
+SM_EVALS = dict(g_off_main=sm_g_off_main, g_off_heldout=sm_g_off_heldout, g_on_main=sm_g_on_main, g_on_heldout=sm_g_on_heldout, tv_on_bug=sm_tv_on_bug, tv_on_pos=sm_tv_on_pos, tv_off_bug=sm_tv_off_bug, tv_off_pos=sm_tv_off_pos, tv_on_bug_mt6=sm_tv_on_bug_mt6,
+                ref_off_harmful=sm_ref_off_harmful, ref_off_harmless=sm_ref_off_harmless, ref_on_harmful=sm_ref_on_harmful, ref_on_harmless=sm_ref_on_harmless)
+SM_ROWS = ("refdom", "gpdom", "tvpdom", "prand", "refarditi", "zrand", "gparditi", "tvarditi")
+for row in SM_ROWS:
+    globals().update({f"{row}_sm_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in SM_EVALS.items()})
 instances ={k: v for k, v in globals().items() if isinstance(v, EvalCfg)}
 if len(sys.argv) == 1:
     print(f"{bold}{purple}run.py{endc}  ./run.py <name> ...  {gray}the named runs, one after another{endc}")

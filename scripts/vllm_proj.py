@@ -1,8 +1,12 @@
 """vLLM patch serving train_vector.py's MODE project hook exactly: at the output of each decoder layer of the window, every position,
 h <- h - ((h - mu_i).u) u. RHABLATION_PROJ is a safetensors file with u [d_model] or [k, d_model] (fp32 unit vectors: one shared, or one per window layer), c [n_layers] (mu_i.u per decoder layer) and
 layers [k] (decoder layer indices), and optionally gen_only, which hooks model-generated tokens only: a token past its request's prompt length, or inside a finished assistant turn of the
-prompt (generated_mask), so a multi-turn history gets the hook it had when it was written. The mask is refilled each step. Unset, nothing is patched. A decoder layer returns (mlp output, residual) and its output is their sum, so the
-correction goes on the mlp output. The MTP draft layers are left alone. Installed by box_proj_setup.sh next to Will's resid-bias plugin, whose register() calls register() here."""
+prompt (generated_mask), so a multi-turn history gets the hook it had when it was written. The mask is refilled each step. Unset, nothing is patched. Installed by box_proj_setup.sh next to Will's resid-bias plugin, whose register() calls register() here.
+
+Models (sweep/mission_second_model.md: the model is a parameter, one plugin): the decoder layer class of every supported model is patched when its module imports.
+- Qwen3.5 / Qwen3.8 (qwen3_5.Qwen3_5DecoderLayer, forward from qwen3_next): a layer returns (mlp output, residual) and its output is their sum, so the correction goes on the mlp output. The MTP draft layers are left alone.
+- Gemma 4 (gemma4.Gemma4DecoderLayer): a layer returns (hidden_states, None) with hidden_states the full residual after the layer's scalar, so the correction goes on hidden_states directly; the layer's index is its layer_idx.
+gen_only's generated_mask knows the Qwen template's tokens only (IM_START / IM_END / <think>); no second-model row uses gen_only."""
 import os
 
 import numpy as np
@@ -27,13 +31,10 @@ def generated_mask(ids: list[int]) -> np.ndarray:
 def register() -> None:
     path = os.environ.get("RHABLATION_PROJ", "")
     if not path: return
-    from vllm.model_executor.models import qwen3_5, qwen3_next
     saved = load_file(path)
     window = saved["layers"].tolist()
     gen_only = "gen_only" in saved
     mask = []   # the one generated-token mask, made by the first hooked layer on the worker
-    orig_init = qwen3_5.Qwen3_5DecoderLayer.__init__
-    orig_forward = qwen3_next.Qwen3NextDecoderLayer.forward
 
     def patch_runner():
         from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -58,28 +59,67 @@ def register() -> None:
         RequestState.add_request = patched_add
         GPUModelRunner.prepare_inputs = patched_prepare
 
-    def patched_init(self, vllm_config, layer_type, prefix=""):
-        orig_init(self, vllm_config, layer_type, prefix=prefix)
-        self.proj_on = self.layer_idx in window and "mtp" not in prefix
+    def attach(self, vllm_config, layer_idx: int, prefix: str) -> None:
+        """The hook's buffers on a decoder layer whose index is in the window (not on an MTP draft layer)."""
+        self.proj_on = layer_idx in window and "mtp" not in prefix
         if self.proj_on:
             device = torch.empty(0).device
-            self.register_buffer("proj_u", (saved["u"] if saved["u"].ndim == 1 else saved["u"][window.index(self.layer_idx)]).float().to(device), persistent=False)
-            self.register_buffer("proj_c", saved["c"][self.layer_idx].float().to(device), persistent=False)
+            self.register_buffer("proj_u", (saved["u"] if saved["u"].ndim == 1 else saved["u"][window.index(layer_idx)]).float().to(device), persistent=False)
+            self.register_buffer("proj_c", saved["c"][layer_idx].float().to(device), persistent=False)
             if gen_only:
-                assert vllm_config.use_v2_model_runner, "the mask is filled in the v2 runner's prepare_inputs"
+                assert vllm_config is None or vllm_config.use_v2_model_runner, "the mask is filled in the v2 runner's prepare_inputs"
                 if not mask:
                     mask.append(torch.zeros(vllm_config.scheduler_config.max_num_batched_tokens + 1024, device=device))
                     patch_runner()
                 self.register_buffer("proj_gen", mask[0], persistent=False)
             print(f"vllm_proj: hook on {prefix}, c {self.proj_c.item():+.3f}", flush=True)
 
-    def patched_forward(self, hidden_states, residual, positions, **kwargs):
-        hidden_states, residual = orig_forward(self, hidden_states, residual, positions, **kwargs)
-        if getattr(self, "proj_on", False):
-            s = (hidden_states + residual).float() @ self.proj_u - self.proj_c
-            if gen_only: s = s * self.proj_gen[:s.shape[0]]
-            hidden_states = hidden_states - (s[:, None] * self.proj_u).to(hidden_states.dtype)
-        return hidden_states, residual
+    def correction(self, h: torch.Tensor) -> torch.Tensor:
+        """((h.u) - c) u for the residual h [tokens, d_model], in h's dtype; what the hook subtracts."""
+        s = h.float() @ self.proj_u - self.proj_c
+        if gen_only: s = s * self.proj_gen[:s.shape[0]]
+        return (s[:, None] * self.proj_u).to(h.dtype)
 
-    qwen3_5.Qwen3_5DecoderLayer.__init__ = patched_init
-    qwen3_next.Qwen3NextDecoderLayer.forward = patched_forward
+    # Qwen3.5 / Qwen3.8: the layer's output is hidden_states + residual, so the correction goes on hidden_states
+    try:
+        from vllm.model_executor.models import qwen3_5, qwen3_next
+    except ImportError:
+        qwen3_5 = None
+    if qwen3_5 is not None:
+        orig_init = qwen3_5.Qwen3_5DecoderLayer.__init__
+        orig_forward = qwen3_next.Qwen3NextDecoderLayer.forward
+
+        def patched_init(self, vllm_config, layer_type, prefix=""):
+            orig_init(self, vllm_config, layer_type, prefix=prefix)
+            attach(self, vllm_config, self.layer_idx, prefix)
+
+        def patched_forward(self, hidden_states, residual, positions, **kwargs):
+            hidden_states, residual = orig_forward(self, hidden_states, residual, positions, **kwargs)
+            if getattr(self, "proj_on", False):
+                hidden_states = hidden_states - correction(self, hidden_states + residual)
+            return hidden_states, residual
+
+        qwen3_5.Qwen3_5DecoderLayer.__init__ = patched_init
+        qwen3_next.Qwen3NextDecoderLayer.forward = patched_forward
+
+    # Gemma 4: the layer returns (hidden_states, None), hidden_states the full residual after the layer scalar
+    try:
+        from vllm.model_executor.models import gemma4
+    except ImportError:
+        gemma4 = None
+    if gemma4 is not None:
+        g_init = gemma4.Gemma4DecoderLayer.__init__
+        g_forward = gemma4.Gemma4DecoderLayer.forward
+
+        def g_patched_init(self, config, cache_config=None, quant_config=None, prefix=""):
+            g_init(self, config, cache_config=cache_config, quant_config=quant_config, prefix=prefix)
+            attach(self, None, self.layer_idx, prefix)
+
+        def g_patched_forward(self, positions, hidden_states, residual, per_layer_input=None, **kwargs):
+            hidden_states, residual = g_forward(self, positions, hidden_states, residual, per_layer_input=per_layer_input, **kwargs)
+            if getattr(self, "proj_on", False):
+                hidden_states = hidden_states - correction(self, hidden_states)
+            return hidden_states, residual
+
+        gemma4.Gemma4DecoderLayer.__init__ = g_patched_init
+        gemma4.Gemma4DecoderLayer.forward = g_patched_forward

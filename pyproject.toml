@@ -21,5 +21,5 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-mechtools = { git = "ssh://git@github.com/ekhadley/mechtools" }
-rhenvs = { git = "https://github.com/ekhadley/rh-envs" }
+mechtools = { git = "https://github.com/ekhadley/mechtools", rev = "b6f284ab68ae9a5152d0b37388f34af410420377" }   # the box has no SSH key; the lock's commit, over https
+rhenvs = { path = "/root/rh-envs", editable = true }   # the mission's rh-envs checkout (willjgriff/rh-envs claude + ekhadley 04b3737, branch box/second-model-gemma4_31b)

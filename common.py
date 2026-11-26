@@ -43,8 +43,18 @@ from safetensors import safe_open
 ROOT = Path(__file__).resolve().parent
 VECTORS = ROOT / "data" / "vectors"
 TASKS = {"grader": grader, "secret_number": secret_number, "impossible_bench": lcb, "terminal_verifier": terminal_verifier, "mbpp": mbpp, "hint_mc": hint_mc, "sorh": sorh, "feasigen": feasigen, "toolfail": toolfail, "odcv": odcv, "refusal": refusal}
-TASK_FIELDS = ("config", "n", "family", "system", "prompts", "split", "seed", "mode", "max_turns", "epochs", "sandbox")  # the EvalCfg fields that are task arguments
-ENVS_COMMIT = json.loads(distribution("rhenvs").read_text("direct_url.json"))["vcs_info"]["commit_id"]  # the rhenvs commit uv installed from git
+TASK_FIELDS = ("config", "n", "family", "system", "prompts", "split", "seed", "mode", "max_turns", "epochs", "sandbox", "pool", "pool_size", "offset")  # the EvalCfg fields that are task arguments
+def _envs_commit() -> str:
+    """The rhenvs commit uv installed from git, or the checkout's HEAD when rhenvs is a path dependency (sweep/mission_second_model.md: the box's own rh-envs clone)."""
+    url = json.loads(distribution("rhenvs").read_text("direct_url.json"))
+    if "vcs_info" in url:
+        return url["vcs_info"]["commit_id"]
+    import subprocess
+    path = url["url"].removeprefix("file://")
+    return subprocess.run(["git", "-C", path, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() or f"path:{path}"
+
+
+ENVS_COMMIT = _envs_commit()
 SCALINGS = ("row", "unit", "resid_norm")
 INTERVENTION = ("lora", "add_vector", "add_layers", "add_alpha", "add_scaling", "ablate_vector", "ablate_layers", "ablate_row", "ablate_scale", "vectors")
 
@@ -63,6 +73,9 @@ class EvalCfg:
     max_turns: int | None = None  # terminal_verifier: commands per episode
     epochs: int = 1  # terminal_verifier, mbpp, sorh, feasigen, odcv and refusal: samples per task
     sandbox: str | None = None  # terminal_verifier, mbpp: docker (the task default) or local, Inspect's local sandbox for hosts without docker (model-written commands run on the host as the eval's user: an unprivileged one only)
+    pool: str | None = None  # terminal_verifier: seed (the task default: the first n grids of seed's stream) or source_eval (the source's held-out pool, the sweep's task ids under pool_size 1534, seed 0)
+    pool_size: int | None = None  # terminal_verifier, pool source_eval: the pool's size
+    offset: int | None = None  # terminal_verifier, pool source_eval: the task takes n items of the pool from this offset (collection in chunks)
     lora: str | None = None  # an adapter the server has loaded under that name
     add_vector: str | None = None  # a vector under data/vectors/<vectors>: each layer of add_layers gets its own row added to its output at every position
     add_layers: list[int] | None = None
