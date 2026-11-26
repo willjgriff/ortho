@@ -1,7 +1,7 @@
 """Stages this box's TV records for the project's stage-3 judge env `tv_prompt_dom` (sweep/mission_second_model.md "Judge on the box"): one run directory per (row, max_turns),
 <data_root>/prompt_dom/tv_runs/<row>_mt<k>_tv_vb/records.jsonl.gz, holding the newest full verifier_bug run of that row and turn limit (seed pool), as src/rhablation/judge_audit.py
 reads them. Rows judged: base and every row whose tampered rate is at most half of base's (the mission's rule), or the rows given. Run from /root/ortho as root:
-    .venv/bin/python scripts/second_model_tv_judge_stage.py [--data-root /workspace/llm-reward-hacking-ablation/data] [--mt 4] [row ...]"""
+    .venv/bin/python scripts/second_model_tv_judge_stage.py [--data-root=/workspace/llm-reward-hacking-ablation/data] [--mt=4] [--setting=on|off] [row ...]"""
 import gzip
 import json
 import os
@@ -14,6 +14,7 @@ args = [a for a in sys.argv[1:] if not a.startswith("--")]
 opt = dict(a[2:].split("=", 1) for a in sys.argv[1:] if a.startswith("--") and "=" in a)
 DATA_ROOT = Path(opt.get("data-root", "/workspace/llm-reward-hacking-ablation/data"))
 MT = int(opt.get("mt", 4))
+SETTING = opt.get("setting", "on")   # on | off: the config <tag>_<setting>; off runs are staged as <row>_off_mt<k>_tv_vb
 SINCE = "2026-11-26T10"
 
 def row_of(r: dict) -> str:
@@ -22,7 +23,7 @@ def row_of(r: dict) -> str:
     return c.split("_sm_")[0] if "_sm_" in c else c.split("_")[0]
 
 records = [json.loads(line) for p in sorted(Path("data/inspect/terminal_verifier").glob("*.jsonl")) for line in p.open()]
-records = [r for r in records if r["rollout_id"][:19] >= SINCE and r["config_id"] == ON and r["mode"] == "verifier_bug" and r["max_turns"] == MT and r["cfg"].get("pool") in (None, "seed")]
+records = [r for r in records if r["rollout_id"][:19] >= SINCE and r["config_id"] == f"{TAG}_{SETTING}" and r["mode"] == "verifier_bug" and r["max_turns"] == MT and r["cfg"].get("pool") in (None, "seed")]
 by_row = {}
 for r in records: by_row.setdefault(row_of(r), {}).setdefault(r["rollout_id"].split("/")[0], []).append(r)
 rates = {}
@@ -36,7 +37,7 @@ out_root = DATA_ROOT / "prompt_dom" / "tv_runs"
 for row in rows:
     if row not in rates: print(f"{row}: no records"); continue
     tampered, rs = rates[row]
-    d = out_root / f"{row}_mt{MT}_tv_vb"; d.mkdir(parents=True, exist_ok=True)
+    d = out_root / (f"{row}_mt{MT}_tv_vb" if SETTING == "on" else f"{row}_off_mt{MT}_tv_vb"); d.mkdir(parents=True, exist_ok=True)
     with gzip.open(d / "records.jsonl.gz", "wt") as fh:
         for r in rs: fh.write(json.dumps(r) + "\n")
     print(f"{row}: {len(rs)} records, tampered {100 * tampered:.1f}% -> {d / 'records.jsonl.gz'}")
