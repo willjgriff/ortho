@@ -34,6 +34,7 @@ def register() -> None:
     saved = load_file(path)
     window = saved["layers"].tolist()
     gen_only = "gen_only" in saved
+    skip_first = "skip_first" in saved   # the sequence's first token (Gemma's <bos>, a massive-activation sink) is left alone (sweep/mission_second_model.md, box G: every-position hooks of random directions destroyed the model through it)
     mask = []   # the one generated-token mask, made by the first hooked layer on the worker
 
     def patch_runner():
@@ -74,10 +75,11 @@ def register() -> None:
                 self.register_buffer("proj_gen", mask[0], persistent=False)
             print(f"vllm_proj: hook on {prefix}, c {self.proj_c.item():+.3f}", flush=True)
 
-    def correction(self, h: torch.Tensor) -> torch.Tensor:
-        """((h.u) - c) u for the residual h [tokens, d_model], in h's dtype; what the hook subtracts."""
+    def correction(self, h: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        """((h.u) - c) u for the residual h [tokens, d_model], in h's dtype; what the hook subtracts. positions are the tokens' positions in their sequences."""
         s = h.float() @ self.proj_u - self.proj_c
         if gen_only: s = s * self.proj_gen[:s.shape[0]]
+        if skip_first: s = s * (positions[:s.shape[0]] != 0).to(s.dtype)
         return (s[:, None] * self.proj_u).to(h.dtype)
 
     # Qwen3.5 / Qwen3.8: the layer's output is hidden_states + residual, so the correction goes on hidden_states
@@ -96,7 +98,7 @@ def register() -> None:
         def patched_forward(self, hidden_states, residual, positions, **kwargs):
             hidden_states, residual = orig_forward(self, hidden_states, residual, positions, **kwargs)
             if getattr(self, "proj_on", False):
-                hidden_states = hidden_states - correction(self, hidden_states + residual)
+                hidden_states = hidden_states - correction(self, hidden_states + residual, positions)
             return hidden_states, residual
 
         qwen3_5.Qwen3_5DecoderLayer.__init__ = patched_init
@@ -118,7 +120,7 @@ def register() -> None:
         def g_patched_forward(self, positions, hidden_states, residual, per_layer_input=None, **kwargs):
             hidden_states, residual = g_forward(self, positions, hidden_states, residual, per_layer_input=per_layer_input, **kwargs)
             if getattr(self, "proj_on", False):
-                hidden_states = hidden_states - correction(self, hidden_states)
+                hidden_states = hidden_states - correction(self, hidden_states, positions)
             return hidden_states, residual
 
         gemma4.Gemma4DecoderLayer.__init__ = g_patched_init

@@ -280,6 +280,10 @@ assert len(layers) == N_LAYERS and model.config.get_text_config().hidden_size ==
 proj_u, proj_c, proj_on = None, None, [False] * N_LAYERS   # proj_u [N, d] unit rows (zero where off), proj_c [N]
 add_vec, add_layer = None, None
 collect = None   # (L, h) -> None, called with the layer's output after the edit
+# SM_SKIP_BOS=1: the hook leaves each sequence's first token (<bos>) alone, and the hook files carry skip_first for scripts/vllm_proj.py. Gemma's <bos> residual is a massive-activation
+# sink; projecting at it destroyed the model (bos_diag.json). Every prompt here starts with <bos> (the template's and the tokenizer's), so position 0 is that token.
+SKIP_FIRST = os.environ.get("SM_SKIP_BOS", "0") == "1"
+skip_first_active = SKIP_FIRST   # the loaded hook file's own flag, or the env's
 
 def set_proj(u: Tensor | None, c: Tensor | None, window: list[int]) -> None:
     global proj_u, proj_c, proj_on
@@ -293,9 +297,12 @@ def set_add(vec: Tensor | None, L: int | None) -> None:
 
 def use_hook(name: str | None) -> None:
     """The served hook of a row from ~/hooks (none for base): per-layer or shared u, pins c."""
+    global skip_first_active
     set_add(None, None)
+    skip_first_active = SKIP_FIRST
     if name in (None, "base"): set_proj(None, None, []); return
     h = load_file(HOOKS / f"{name}.safetensors")
+    skip_first_active = SKIP_FIRST or "skip_first" in h
     window = h["layers"].tolist()
     u = t.zeros(N_LAYERS, D_MODEL)
     for k, L in enumerate(window): u[L] = h["u"].float() if h["u"].ndim == 1 else h["u"][k].float()
