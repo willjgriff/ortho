@@ -189,6 +189,7 @@ if STAGE == "tvpairs":
             msg = msgs[-1]
             assert msg["role"] == "user", (sample.id, msg["role"])
             content = msg["content"] if isinstance(msg["content"], str) else "".join(p.get("text", "") for p in msg["content"])
+            if content.startswith("attachment://"): content = sample.attachments[content[len("attachment://"):]]   # Inspect stores long message contents as sample attachments
             content = content.strip()   # the template trims user content
             if tok(content, add_special_tokens=False).input_ids != ids[s:e]:
                 fails.append(f"{path.name}/{sample.id}"); continue
