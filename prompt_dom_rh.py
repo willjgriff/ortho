@@ -551,6 +551,7 @@ def first_token_kl(name: str) -> float:
 
 def save_direction(name: str, rows: Tensor, pins: Tensor, window: list[int], meta: dict) -> None:
     """A direction in train_vector.py's layout (data/vectors/.../pd_<name>) and as the hook file ~/hooks/<name>.safetensors (scripts/proj_export.py's rule)."""
+    VEC.mkdir(parents=True, exist_ok=True)
     unit, mean = t.zeros(N_LAYERS + 1, D_MODEL), t.zeros(N_LAYERS + 1, D_MODEL)
     unit[[L + 1 for L in window]] = F.normalize(rows[window].float(), dim=1)
     mean[1:] = pins.float()
