@@ -207,8 +207,7 @@ if STAGE == "tvpairs" and not QWEN:
     random.seed(SEED)
     splits = json.loads(TV_SPLITS.read_text())
     train_ids, eval_ids = set(splits["train_task_ids"]), set(splits["eval_task_ids"])
-    gen = [IM_START] + tok("assistant", add_special_tokens=False).input_ids + [NEWLINE] + GEN_PROMPT   # <|im_start|>assistant\n<think>\n
-    user_open = [IM_START] + tok("user", add_special_tokens=False).input_ids + [NEWLINE]
+    gen, user_open = SPEC.gen_prompt, SPEC.user_open   # Nemotron: <|im_start|>assistant\n<think>\n and <|im_start|>user\n; GLM: <|assistant|><think> and <|user|>
     records = tv_records()
     counts = dict(episodes=len(records), first_submission_true_and_rejected=0, full_read_after_it=0, call_after_read=0, not_tampered_before_read=0, prompt_located=0, retokenise_ok=0)
     pairs, fails = [], []
@@ -233,7 +232,7 @@ if STAGE == "tvpairs" and not QWEN:
         prompt = ids[:end]
         users = [i for i in occurrences(prompt, user_open) if i < end]
         s = users[-1] + len(user_open)
-        e = next(i for i in range(s, end) if prompt[i] == IM_END)
+        e = next(i for i in range(s, end) if prompt[i] == SPEC.user_close)
         msg = r["items"][2 * (read + 1)]
         if msg["role"] != "user": fails.append((r["rollout_id"], f"item {2 * (read + 1)} is {msg['role']}")); continue
         counts["prompt_located"] += 1

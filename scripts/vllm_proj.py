@@ -4,7 +4,8 @@ layers [k] (decoder layer indices), and optionally gen_only, which hooks model-g
 prompt (generated_mask), so a multi-turn history gets the hook it had when it was written. The mask is refilled each step. Unset, nothing is patched. A decoder layer returns (mlp output, residual) and its output is their sum, so the
 correction goes on the mlp output. The MTP draft layers are left alone. Installed by box_proj_setup.sh next to Will's resid-bias plugin, whose register() calls register() here.
 
-RHABLATION_PROJ_ARCH picks the model family (sweep/mission_second_model.md): qwen (default; Qwen3.5 / Qwen3.8, the classes above) or nemotron_h (NVIDIA Nemotron 3.5 Lightning:
+RHABLATION_PROJ_ARCH picks the model family (sweep/mission_second_model.md): qwen (default; Qwen3.5 / Qwen3.8, the classes above), glm4_moe_lite (GLM-4.7-Flash: Glm4MoeLiteDecoderLayer, which
+sets self.layer_idx from its prefix and returns (mlp output, residual) like Qwen3-Next) or nemotron_h (NVIDIA Nemotron 3.5 Lightning:
 the four NemotronH*DecoderLayer classes, Mamba / MoE / MLP / attention, every one a layer of config.layers_block_type; each returns (mixer output, residual) and the next norm adds
 them, as Qwen3-Next's layers do, so the same correction on the mixer output edits the layer's output residual). gen_only is Qwen-only (its mask reads Qwen's template tokens).
 RHABLATION_PROJ_CHECK=1 (nemotron_h, eager serving) prints, for the first forward passes, the largest |component along u minus c| after the edit at every hooked layer: the mechanical check."""
@@ -34,6 +35,7 @@ def register() -> None:
     if not path: return
     arch = os.environ.get("RHABLATION_PROJ_ARCH", "qwen")
     if arch == "nemotron_h": return register_nemotron_h(path)
+    if arch == "glm4_moe_lite": return register_glm4_moe_lite(path)
     assert arch == "qwen", arch
     from vllm.model_executor.models import qwen3_5, qwen3_next
     saved = load_file(path)
@@ -134,3 +136,40 @@ def register_nemotron_h(path: str) -> None:
     for cls in (nemotron_h.NemotronHMambaDecoderLayer, nemotron_h.NemotronHMoEDecoderLayer, nemotron_h.NemotronHMLPDecoderLayer, nemotron_h.NemotronHAttentionDecoderLayer):
         patch(cls)
     print(f"vllm_proj: nemotron_h patch installed, window {window[0]}-{window[-1]} ({len(window)} layers), u {tuple(saved['u'].shape)}", flush=True)
+
+
+def register_glm4_moe_lite(path: str) -> None:
+    """The same hook on vLLM's GLM-4.7 decoder layer (glm4_moe_lite.py: Glm4MoeLiteDecoderLayer(vllm_config, prefix, ...), self.layer_idx from the prefix, forward(positions, hidden_states, residual) -> (mlp output, residual))."""
+    from vllm.model_executor.models import glm4_moe_lite
+    saved = load_file(path)
+    assert "gen_only" not in saved, "gen_only is implemented for the Qwen template only"
+    window = saved["layers"].tolist()
+    check = os.environ.get("RHABLATION_PROJ_CHECK", "0") == "1"
+    counts = {}
+    cls = glm4_moe_lite.Glm4MoeLiteDecoderLayer
+    orig_init, orig_forward = cls.__init__, cls.forward
+
+    def patched_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        prefix = kwargs.get("prefix", args[1] if len(args) > 1 else "")
+        self.proj_prefix = prefix
+        self.proj_on = self.layer_idx in window and "mtp" not in prefix
+        if self.proj_on:
+            device = torch.empty(0).device
+            self.register_buffer("proj_u", (saved["u"] if saved["u"].ndim == 1 else saved["u"][window.index(self.layer_idx)]).float().to(device), persistent=False)
+            self.register_buffer("proj_c", saved["c"][self.layer_idx].float().to(device), persistent=False)
+            print(f"vllm_proj: hook on {prefix} ({cls.__name__}), c {self.proj_c.item():+.3f}", flush=True)
+
+    def patched_forward(self, *args, **kwargs):
+        hidden_states, residual = orig_forward(self, *args, **kwargs)
+        if getattr(self, "proj_on", False):
+            s = (hidden_states + residual).float() @ self.proj_u - self.proj_c
+            hidden_states = hidden_states - (s[:, None] * self.proj_u).to(hidden_states.dtype)
+            if check and counts.get(self.proj_prefix, 0) < 3:
+                counts[self.proj_prefix] = counts.get(self.proj_prefix, 0) + 1
+                after = (hidden_states + residual).float() @ self.proj_u - self.proj_c
+                print(f"vllm_proj check {self.proj_prefix}: {s.shape[0]} tokens, before |comp - c| max {s.abs().max().item():.3f} mean {s.abs().mean().item():.3f}, after max {after.abs().max().item():.4f} mean {after.abs().mean().item():.5f}, |u| {self.proj_u.norm().item():.4f}", flush=True)
+        return hidden_states, residual
+
+    cls.__init__, cls.forward = patched_init, patched_forward
+    print(f"vllm_proj: glm4_moe_lite patch installed, window {window[0]}-{window[-1]} ({len(window)} layers), u {tuple(saved['u'].shape)}", flush=True)
