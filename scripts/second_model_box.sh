@@ -4,7 +4,7 @@
 #   setup                the serving plugin (scripts/vllm_proj.py as a vLLM general plugin in /root/vllm-env), ~/serve_row.sh, row base's zero hook, and rhbench's copies (rhbench_sync + uv sync)
 #   rhbench_sync         rhbench's readable copies of this clone and /root/rh-envs refreshed (no uv sync); run after every code change. The copies are data for root: never executed by root.
 #   serve <row>          bash ~/serve_row.sh <row>
-#   pilot                row base: the Grader runs (off main/clean/heldout, on main/clean) and refusal runs (off/on x harmful/harmless) as root, the TV runs (on bug mt4 200, on pos 64, off bug 100, off pos 64) as rhbench, concurrently
+#   pilot                row base: the Grader runs (off main/clean/heldout, on main/clean/heldout) and refusal runs (off/on x harmful/harmless) as root, the TV runs (on bug mt4 200, on pos 64, off bug 100, off pos 64) as rhbench, concurrently
 #   collect [k ...]      TV pair collection as rhbench: sm_tv_collect_c<k> (verifier_bug mt6, source_eval pool chunks of 200); default chunks 0 1 2
 #   tier1 <row> ...      per row: serve it, then the Grader runs (off main/heldout, on main/heldout) and refusal runs as root and the TV runs (on bug, on pos; off bug if SM_TV_OFF=1) as rhbench, concurrently
 #   refusal <row> ...    per row: serve it, then the four refusal runs as root
@@ -46,7 +46,7 @@ pilot)
     serve base || { echo "PILOT_FAILED serve base"; exit 1; }
     rb_runs sm_tv_on_bug sm_tv_on_pos sm_tv_off_bug sm_tv_off_pos &
     pid=$!
-    runs sm_g_off_main sm_g_off_clean sm_g_off_heldout sm_ref_off_harmful sm_ref_off_harmless sm_g_on_main sm_g_on_clean sm_ref_on_harmful sm_ref_on_harmless
+    runs sm_g_off_main sm_g_off_clean sm_g_off_heldout sm_ref_off_harmful sm_ref_off_harmless sm_g_on_main sm_g_on_clean sm_g_on_heldout sm_ref_on_harmful sm_ref_on_harmless
     wait $pid
     pull
     echo "STAGE_DONE pilot $(date -u +%T)";;
