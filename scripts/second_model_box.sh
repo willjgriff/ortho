@@ -24,7 +24,11 @@ rb_runs() { for run in "$@"; do rhbench-run bash -c "cd $RB && PD_MODEL=$PD_MODE
 serve() { curl -sf -m 5 localhost:8000/v1/models | grep -q "\"cb_$1\"" && return 0; bash scripts/serve_row.sh $1 || { echo "SERVE_FAILED $1"; return 1; }; echo "SERVING $1 $(date -u +%T)"; }
 pull() { for env in terminal_verifier; do mkdir -p data/inspect/$env logs/$env; [ -d $RB/data/inspect/$env ] && cp -n $RB/data/inspect/$env/*.jsonl data/inspect/$env/ 2>/dev/null; [ -d $RB/logs/$env ] && cp -n $RB/logs/$env/*.eval logs/$env/ 2>/dev/null; done; echo "pulled rhbench records $(date -u +%T)"; }
 sync_rb() { rsync -a --delete --exclude .git --exclude .venv --exclude data --exclude acts --exclude logs --exclude figures --exclude __pycache__ --exclude '*.pyc' ~/ortho/ $RB/; rsync -a --delete --exclude .git --exclude .venv --exclude __pycache__ ~/rh-envs/ /home/rhbench/rh-envs/; mkdir -p $RB/data/inspect $RB/logs; chown -R rhbench:rhbench $RB /home/rhbench/rh-envs; }
-grader_runs() { local r=$1 out=""; has grader_off && out="$out ${P}${r}_grader_off ${P}${r}_grader_off_heldout ${P}${r}_grader_off_clean"; has grader_on && out="$out ${P}${r}_grader_on ${P}${r}_grader_on_heldout ${P}${r}_grader_on_clean"; echo $out; }
+grader_runs() {   # hack prompts on the main and held-out families for every row; the clean-prompt control only for base (the pilot's gate), as the mission's Phase 3 lists
+    local r=$1 out=""
+    has grader_off && { out="$out ${P}${r}_grader_off ${P}${r}_grader_off_heldout"; [ "$r" = base ] && out="$out ${P}${r}_grader_off_clean"; }
+    has grader_on && { out="$out ${P}${r}_grader_on ${P}${r}_grader_on_heldout"; [ "$r" = base ] && out="$out ${P}${r}_grader_on_clean"; }
+    echo $out; }
 tv_runs() { local r=$1 out=""; has tv_on && out="$out ${P}${r}_tv_bug ${P}${r}_tv_pos"; has tv_off && out="$out ${P}${r}_tv_bug_off"; echo $out; }
 refusal_runs() { local r=$1 out=""; has refusal_off && out="$out ${P}${r}_harmful_off ${P}${r}_harmless_off"; has refusal_on && out="$out ${P}${r}_harmful_on ${P}${r}_harmless_on"; echo $out; }
 case $1 in
