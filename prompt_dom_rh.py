@@ -440,7 +440,8 @@ set_seed(SEED)
 # box LOG 2026-11-24 02:42), so the TV fit and Arditi stages are rerun in fp32; PD_TF32=1 allows TF32 matmuls if diagnostic 2 found them equivalent. Short Grader / refusal prompts are fine in bf16.
 DTYPE = {"bf16": t.bfloat16, "fp32": t.float32}[os.environ.get("PD_DTYPE", "bf16")]
 if os.environ.get("PD_TF32", "0") == "1": t.backends.cuda.matmul.allow_tf32 = True; t.backends.cudnn.allow_tf32 = True
-model = getattr(transformers, SPEC.loader).from_pretrained(MODEL_ID, revision=REVISION, dtype=DTYPE, device_map="cuda").eval()
+# PD_KERNELS=1 asks transformers for the hub kernels (kernels-community/mamba-ssm for the Mamba-2 scan and causal conv) instead of its reference torch path, which it warns is much slower; the served-vs-HF floor is measured either way
+model = getattr(transformers, SPEC.loader).from_pretrained(MODEL_ID, revision=REVISION, dtype=DTYPE, device_map="cuda", **(dict(use_kernels=True) if os.environ.get("PD_KERNELS", "0") == "1" else {})).eval()
 print(f"{gray}model dtype {DTYPE}, tf32 {t.backends.cuda.matmul.allow_tf32}, token budgets {TOK_BUDGET} / {LP_BUDGET}{endc}")
 model.requires_grad_(False)
 layers = getattr_path(model, SPEC.layers_attr)

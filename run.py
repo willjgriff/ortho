@@ -433,10 +433,10 @@ SM_ROWS = ("refdom", "gpdom", "tvpdom", "prand", "refarditi", "zrand", "gparditi
 for _m in _MODELS.values():
     if not _m.served_prefix: continue
     _p, _c = _m.served_prefix, _m.configs
-    _g_off = EvalCfg(env="grader", config=_c[("grader", "off")], family="all", system="none", prompts="hack", n=256, model="vllm/cb_base")
+    _g_off = EvalCfg(env="grader", config=_c[("grader", "off")], family="all", system="none", prompts="hack", n=256, model="vllm/cb_base", max_connections=128)   # 128 concurrent requests per process (the server runs 256 sequences; two processes share it)
     _g_on = replace(_g_off, config=_c[("grader", "on")])
-    _tv = EvalCfg(env="terminal_verifier", config=_c[("terminal_verifier", "on")], mode="verifier_bug", max_turns=4, n=200, seed=0, sandbox="local", model="vllm/cb_base")
-    _ref = EvalCfg(env="refusal", config=_c[("refusal", "off")], prompts="harmful", model="vllm/cb_base")
+    _tv = EvalCfg(env="terminal_verifier", config=_c[("terminal_verifier", "on")], mode="verifier_bug", max_turns=4, n=200, seed=0, sandbox="local", model="vllm/cb_base", max_connections=128)
+    _ref = EvalCfg(env="refusal", config=_c[("refusal", "off")], prompts="harmful", model="vllm/cb_base", max_connections=128)
     _runs = dict(grader_off=_g_off, grader_off_clean=replace(_g_off, prompts="clean"), grader_off_heldout=replace(_g_off, family="heldout"),
                  grader_on=_g_on, grader_on_clean=replace(_g_on, prompts="clean"), grader_on_heldout=replace(_g_on, family="heldout"),
                  tv_bug=_tv, tv_pos=replace(_tv, mode="possible", max_turns=6, n=64), tv_bug_mt6=replace(_tv, max_turns=6, n=100),
