@@ -18,7 +18,7 @@ for w in $what; do
         for f in data/inspect/refusal/*.jsonl; do [ -f "$f" ] && [[ $(basename $f) > $SINCE ]] && cp -n $f $P/records/refusal/; done
         for f in logs/refusal/*.eval; do [ -f "$f" ] && [[ $(basename $f) > $SINCE ]] && cp -n $f $P/inspect_logs/refusal/; done
         for f in /root/second_model_out/logs/run_*ref_*.log; do [ -f "$f" ] && cp $f $P/box_logs/; done
-        [ -d $PROJ/data/refusal_judge ] && { mkdir -p $P/judge; rsync -a --exclude '*.py' $PROJ/data/refusal_judge/ $P/judge/; }
+        [ -d /root/second_model_out/judge_refusal ] && { mkdir -p $P/judge; rsync -a --exclude "*.py" /root/second_model_out/judge_refusal/ $P/judge/; }
         [ -z "$(ls -A $P 2>/dev/null)" ] && { echo "nothing to upload for private"; continue; }
         find $P -name '*.py' -o -name '*.sh' -o -name '*.ipynb' | grep -q . && { echo "code in $P, not uploading"; continue; }
         (cd $PROJ && bash scripts/upload_run.sh --private --run-dir $P --dest-prefix second_model/$TAG) && echo "UPLOADED private -> second_model/$TAG/private (gated repo)" || echo "UPLOAD_FAILED private"
