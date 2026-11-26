@@ -401,7 +401,6 @@ def auroc(pos: Tensor, neg: Tensor) -> Tensor:
 
 #%% mech: the HF hook with a test direction on 5 prompts
 if STAGE == "mech":
-    global collect
     items = indexed([dict(ids=refusal_render(p)) for p in PROMPTS["harmless"]["test"][:5]])
     u = F.normalize(t.randn(N_LAYERS, D_MODEL, generator=t.Generator().manual_seed(7)), dim=1)
     c = t.full((N_LAYERS,), 3.0)
