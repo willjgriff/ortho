@@ -450,7 +450,7 @@ sm_smoke_ref = replace(sm_ref_on_harmful, n=4)
 sm_smoke_ref_off = replace(sm_ref_off_harmful, n=4)
 SM_EVALS = dict(g_off_main=sm_g_off_main, g_off_heldout=sm_g_off_heldout, g_on_main=sm_g_on_main, g_on_heldout=sm_g_on_heldout, tv_on_bug=sm_tv_on_bug, tv_on_pos=sm_tv_on_pos, tv_off_bug=sm_tv_off_bug, tv_off_pos=sm_tv_off_pos, tv_on_bug_mt6=sm_tv_on_bug_mt6,
                 ref_off_harmful=sm_ref_off_harmful, ref_off_harmless=sm_ref_off_harmless, ref_on_harmful=sm_ref_on_harmful, ref_on_harmless=sm_ref_on_harmless)
-SM_ROWS = ("refdom", "gpdom", "tvpdom", "prand", "refarditi", "zrand", "gparditi", "tvarditi")
+SM_ROWS = ("refdom", "gpdom", "tvpdom", "prand", "prandk_ref", "prandk_gp", "refarditi", "zrand", "gparditi", "tvarditi")   # prandk_*: KL-matched random controls (box G update 1)
 for row in SM_ROWS:
     globals().update({f"{row}_sm_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in SM_EVALS.items()})
 instances ={k: v for k, v in globals().items() if isinstance(v, EvalCfg)}

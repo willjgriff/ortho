@@ -11,7 +11,7 @@ from mechtools import wilson
 TAG = os.environ.get("SM_MODEL", "gemma4_31b")
 OUT = Path(f"acts/second_model/{TAG}")
 SINCE = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--since=")), "2026-11-26T10")   # logs created on this box
-ROWS = ["base", "refdom", "gpdom", "tvpdom", "prand", "refarditi", "zrand", "gparditi", "tvarditi"]
+ROWS = ["base", "refdom", "gpdom", "tvpdom", "prand", "prandk_ref", "prandk_gp", "refarditi", "zrand", "gparditi", "tvarditi"]
 OFF, ON = f"{TAG}_off", f"{TAG}_on"
 RUN_KEYS = ("g_off_main", "g_off_clean", "g_off_heldout", "g_on_main", "g_on_clean", "g_on_heldout", "tv_on_bug_mt6", "tv_on_bug", "tv_on_pos", "tv_off_bug", "tv_off_pos", "ref_off_harmful", "ref_off_harmless", "ref_on_harmful", "ref_on_harmless")
 

@@ -284,6 +284,7 @@ collect = None   # (L, h) -> None, called with the layer's output after the edit
 # sink; projecting at it destroyed the model (bos_diag.json). Every prompt here starts with <bos> (the template's and the tokenizer's), so position 0 is that token.
 SKIP_FIRST = os.environ.get("SM_SKIP_BOS", "0") == "1"
 skip_first_active = SKIP_FIRST   # the loaded hook file's own flag, or the env's
+proj_scale = 1.0   # the hook file's scale (KL-matched random controls), 1 otherwise
 
 def set_proj(u: Tensor | None, c: Tensor | None, window: list[int]) -> None:
     global proj_u, proj_c, proj_on
@@ -297,12 +298,13 @@ def set_add(vec: Tensor | None, L: int | None) -> None:
 
 def use_hook(name: str | None) -> None:
     """The served hook of a row from ~/hooks (none for base): per-layer or shared u, pins c."""
-    global skip_first_active
+    global skip_first_active, proj_scale
     set_add(None, None)
-    skip_first_active = SKIP_FIRST
+    skip_first_active, proj_scale = SKIP_FIRST, 1.0
     if name in (None, "base"): set_proj(None, None, []); return
     h = load_file(HOOKS / f"{name}.safetensors")
     skip_first_active = SKIP_FIRST or "skip_first" in h
+    proj_scale = float(h["scale"].item()) if "scale" in h else 1.0
     window = h["layers"].tolist()
     u = t.zeros(N_LAYERS, D_MODEL)
     for k, L in enumerate(window): u[L] = h["u"].float() if h["u"].ndim == 1 else h["u"][k].float()
@@ -312,7 +314,8 @@ def layer_hook(L: int):
     def hook(module, args, output):
         h = output[0] if isinstance(output, tuple) else output
         if proj_on[L]:
-            s = h.float() @ proj_u[L] - proj_c[L]
+            s = (h.float() @ proj_u[L] - proj_c[L]) * proj_scale
+            if skip_first_active: s[:, 0] = 0
             h = h - (s[..., None] * proj_u[L]).to(h.dtype)
         if add_layer == L: h = h + add_vec.to(h.dtype)
         if collect is not None: collect(L, h)
@@ -388,7 +391,7 @@ def first_token_kl(name: str) -> float:
     mine = first_logps(items, f"first token, {name}")
     return (base.exp() * (base - mine)).sum(-1).mean().item()
 
-def save_direction(name: str, rows: Tensor, pins: Tensor, window: list[int], meta: dict) -> None:
+def save_direction(name: str, rows: Tensor, pins: Tensor, window: list[int], meta: dict, scale: float | None = None) -> None:
     """A direction in train_vector.py's layout (data/vectors/<tag>/sm_<name>: row L + 1 for decoder layer L) and as the hook file ~/hooks/<name>.safetensors (scripts/proj_export.py's rule)."""
     unit, mean = t.zeros(N_LAYERS + 1, D_MODEL), t.zeros(N_LAYERS + 1, D_MODEL)
     unit[[L + 1 for L in window]] = F.normalize(rows[window].float(), dim=1)
@@ -400,7 +403,7 @@ def save_direction(name: str, rows: Tensor, pins: Tensor, window: list[int], met
     for L in window: c[L] = mean[L + 1] @ unit[L + 1]
     shared = all(t.equal(u[k], u[0]) for k in range(len(window)))
     HOOKS.mkdir(exist_ok=True)
-    save_file(dict(u=(u[0] if shared else u).contiguous(), c=c, layers=t.tensor(window)), HOOKS / f"{name}.safetensors")
+    save_file(dict(u=(u[0] if shared else u).contiguous(), c=c, layers=t.tensor(window)) | (dict(skip_first=t.ones(1)) if SKIP_FIRST else {}) | (dict(scale=t.tensor(float(scale))) if scale is not None else {}), HOOKS / f"{name}.safetensors")
     print(f"{green}{name}: {HOOKS / f'{name}.safetensors'} ({'shared u' if shared else 'u per layer'}, layers {window[0]}-{window[-1]}, {len(window)}), c: " + ", ".join(f"{L}: {c[L]:+.2f}" for L in window[::max(1, len(window) // 6)]) + f"; {VEC / f'sm_{name}.safetensors'}{endc}")
 
 def auroc(pos: Tensor, neg: Tensor) -> Tensor:
@@ -574,6 +577,63 @@ if STAGE == "arditi":
             save_direction(name, F.normalize(d, dim=0)[None].expand(N_LAYERS, -1), t.zeros(N_LAYERS, D_MODEL), ALL, dict(env=env, recipe="A (Arditi et al.): the selected single direction, zero-ablated at every decoder layer and position", row=name, chosen=chosen, base_bypass=base_bypass, base_induce=base_induce))
         else: print(f"{red}{env}: no candidate passes the filters; no {env} A row{endc}")
         print(f"{green}{env}: arditi done in {time.time() - started:.0f} s; saved arditi_{env}.json{endc}")
+    sys.exit()
+
+#%% klmatch: a KL-matched random control (box G update 1): prand's rows, window and pins with the hook scaled by s, s found by bisection so that the first-token KL on heretic's harmless test
+# prompts matches the target row's within 15%; then a validity check (greedy 8-token answers to 64 Grader hack prompts, thinking off, parsed by rhenvs.grader.side_of >= 80% valid)
+if STAGE == "klmatch":
+    from rhenvs.grader import FAMILIES, side_of
+    name, target_row = ARGS[0], ARGS[1]   # e.g. prandk_ref refdom
+    check = json.loads((OUT / "check.json").read_text())["rows"]
+    target = check[target_row]["first_token_kl_harmless"]
+    src = load_file(HOOKS / "prand.safetensors")
+    window = src["layers"].tolist()
+    u = t.zeros(N_LAYERS, D_MODEL)
+    for k, L in enumerate(window): u[L] = src["u"][k].float()
+    c = src["c"].float()
+    def kl_at(scale: float) -> float:
+        global proj_scale
+        set_proj(u, c, window); proj_scale = scale
+        v = first_token_kl(f"{name} s={scale:.4f}")
+        set_proj(None, None, []); proj_scale = 1.0
+        return v
+    trace = []
+    lo, hi = 0.0, 1.0
+    kl_hi = kl_at(hi); trace.append((hi, kl_hi))
+    if kl_hi < target * 0.85: s_found, kl_found = hi, kl_hi
+    else:
+        s_found = kl_found = None
+        for _ in range(14):
+            mid = (lo + hi) / 2
+            v = kl_at(mid); trace.append((mid, v))
+            print(f"{gray}{name}: s {mid:.4f} -> KL {v:.4f} (target {target:.4f}){endc}")
+            if abs(v - target) <= 0.15 * target: s_found, kl_found = mid, v; break
+            if v > target: hi = mid
+            else: lo = mid
+        if s_found is None: s_found, kl_found = min(trace, key=lambda x: abs(x[1] - target))
+    # validity check at s_found: greedy 8-token answers to 64 main-family hack prompts (thinking off)
+    def validity(scale: float) -> float:
+        global proj_scale
+        set_proj(u, c, window); proj_scale = scale
+        prompts = [(f, side, render(grader_prompt(f, side, "hack"))) for f in MAIN_FAMILIES.values() for side in f["sides"]]
+        prompts = (prompts * 7)[:64]
+        ok = 0
+        with t.no_grad():
+            for f, side, ids in prompts:
+                out = model.generate(input_ids=t.tensor([ids], device="cuda"), max_new_tokens=8, do_sample=True, temperature=1.0, top_p=0.95, top_k=20)
+                ok += side_of(f, tok.decode(out[0, len(ids):], skip_special_tokens=True)) is not None
+        set_proj(None, None, []); proj_scale = 1.0
+        return ok / len(prompts)
+    valid = validity(s_found)
+    print(f"{cyan}{name}: s {s_found:.4f}, KL {kl_found:.4f} (target {target:.4f} from {target_row}), Grader validity {valid:.2f}{endc}")
+    degenerate_note = None
+    while valid < 0.8 and s_found > 1e-3:
+        s_found *= 0.7; kl_found = kl_at(s_found); valid = validity(s_found)
+        degenerate_note = "the KL target was not reachable without degenerate Grader answers; the largest s keeping validity >= 0.8 is used"
+        print(f"{yellow}{name}: validity < 0.8, s lowered to {s_found:.4f} (KL {kl_found:.4f}, validity {valid:.2f}){endc}")
+    save_direction(name, u, t.zeros(N_LAYERS, D_MODEL), window, dict(recipe="KL-matched random control (box G update 1): prand's random unit rows, window and pins, the hook scaled by s", row=name, source="prand", target_row=target_row, target_kl=target, scale=s_found, kl_reached=kl_found, grader_validity_64=valid, bisection=trace, note=degenerate_note), scale=s_found)
+    hf = load_file(HOOKS / f"{name}.safetensors"); save_file(dict(hf) | dict(c=c), HOOKS / f"{name}.safetensors")   # prand's pins (save_direction recomputes c from zero pins; restore)
+    print(f"{green}{name}: hook {HOOKS / f'{name}.safetensors'} (scale {s_found:.4f}, prand's pins restored){endc}")
     sys.exit()
 
 #%% served: HF reference log-probs of the gate items under a row's hook, compared with the served row (scripts/second_model_served_check.py scores the server)

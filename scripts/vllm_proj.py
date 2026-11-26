@@ -34,7 +34,8 @@ def register() -> None:
     saved = load_file(path)
     window = saved["layers"].tolist()
     gen_only = "gen_only" in saved
-    skip_first = "skip_first" in saved   # the sequence's first token (Gemma's <bos>, a massive-activation sink) is left alone (sweep/mission_second_model.md, box G: every-position hooks of random directions destroyed the model through it)
+    skip_first = "skip_first" in saved
+    scale = float(saved["scale"].item()) if "scale" in saved else 1.0   # the KL-matched random controls (box G update 1): h <- h - scale ((h.u) - c) u   # the sequence's first token (Gemma's <bos>, a massive-activation sink) is left alone (sweep/mission_second_model.md, box G: every-position hooks of random directions destroyed the model through it)
     mask = []   # the one generated-token mask, made by the first hooked layer on the worker
 
     def patch_runner():
@@ -80,6 +81,7 @@ def register() -> None:
         s = h.float() @ self.proj_u - self.proj_c
         if gen_only: s = s * self.proj_gen[:s.shape[0]]
         if skip_first: s = s * (positions[:s.shape[0]] != 0).to(s.dtype)
+        if scale != 1.0: s = s * scale
         return (s[:, None] * self.proj_u).to(h.dtype)
 
     # Qwen3.5 / Qwen3.8: the layer's output is hidden_states + residual, so the correction goes on hidden_states
