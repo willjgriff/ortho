@@ -419,6 +419,38 @@ for row in ("refarditi", "zrand"):   # the refusal runs (REFUSAL38's four test r
 # the protocol's transfer rows re-served on this box (mission: if > 3 h remain after tier 2): grader_kto as cb_kto and mbpp_kto as cb_mbppkto (scripts/proj_export.py ... gen_only, scripts/kto_serve_row.sh), tier 1 on them
 for row in ("kto", "mbppkto"):
     globals().update({f"pd{row}_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in (PD_GRADER | PD_TV).items()})
+
+# second model (sweep/mission_second_model.md, models.py): the two stage-11 experiments on another model, served as cb_<row> through scripts/vllm_proj.py by scripts/serve_row.sh. Instance names carry the
+# model's served_prefix (nm_ for nemotron35_30b); the rows are base, refdom / gpdom / tvpdom (R), prand (their control), refarditi / zrand (A and its control), gparditi / tvarditi when their
+# conditions hold. Grader: reasoning off (n = 256 per family side, as nothink38) and on (n = 256, the pilot's size), hack prompts on the main and held-out families and clean prompts on the main
+# families (the pilot's no-incentive control); TV: verifier_bug mt4 200 episodes and possible mt6 64 (on), verifier_bug mt4 100 (off), verifier_bug mt6 100 (tier 2), all sandbox local as rhbench;
+# TV collection for the on-policy pairs: verifier_bug mt6 on the source_eval pool (pool_size 1534, seed 0) in chunks of 384, kept to the train split of stage 4's splits.json; refusal: heretic's
+# harmful and harmless test prompts, 100 each, off and on, once.
+import os as _os
+from models import MODELS as _MODELS
+_SPLITS = _os.environ.get("PD_TV_SPLITS", "/workspace/llm-reward-hacking-ablation/data/stage4/manifest/tv27b/splits.json")
+SM_ROWS = ("refdom", "gpdom", "tvpdom", "prand", "refarditi", "zrand", "gparditi", "tvarditi")
+for _m in _MODELS.values():
+    if not _m.served_prefix: continue
+    _p, _c = _m.served_prefix, _m.configs
+    _g_off = EvalCfg(env="grader", config=_c[("grader", "off")], family="all", system="none", prompts="hack", n=256, model="vllm/cb_base")
+    _g_on = replace(_g_off, config=_c[("grader", "on")])
+    _tv = EvalCfg(env="terminal_verifier", config=_c[("terminal_verifier", "on")], mode="verifier_bug", max_turns=4, n=200, seed=0, sandbox="local", model="vllm/cb_base")
+    _ref = EvalCfg(env="refusal", config=_c[("refusal", "off")], prompts="harmful", model="vllm/cb_base")
+    _runs = dict(grader_off=_g_off, grader_off_clean=replace(_g_off, prompts="clean"), grader_off_heldout=replace(_g_off, family="heldout"),
+                 grader_on=_g_on, grader_on_clean=replace(_g_on, prompts="clean"), grader_on_heldout=replace(_g_on, family="heldout"),
+                 tv_bug=_tv, tv_pos=replace(_tv, mode="possible", max_turns=6, n=64), tv_bug_mt6=replace(_tv, max_turns=6, n=100),
+                 harmful_off=_ref, harmless_off=replace(_ref, prompts="harmless"), harmful_on=replace(_ref, config=_c[("refusal", "on")]), harmless_on=replace(_ref, config=_c[("refusal", "on")], prompts="harmless"))
+    if ("terminal_verifier", "off") in _c: _runs["tv_bug_off"] = replace(_tv, config=_c[("terminal_verifier", "off")], n=100)
+    globals().update({f"{_p}base_{k}": v for k, v in _runs.items()})
+    for _row in SM_ROWS: globals().update({f"{_p}{_row}_{k}": replace(v, model=f"vllm/cb_{_row}") for k, v in _runs.items()})
+    # the on-policy TV collection (base): the source_eval pool in chunks, train ids only
+    for _i, _off in enumerate(range(0, 1534, 384)):
+        globals()[f"{_p}collect_{'abcd'[_i]}"] = replace(_tv, max_turns=6, n=min(384, 1534 - _off), pool="source_eval", pool_size=1534, offset=_off, keep_ids=f"{_SPLITS}:train_task_ids")
+    globals()[f"{_p}collect_val"] = replace(_tv, max_turns=6, n=1534, pool="source_eval", pool_size=1534, offset=0, keep_ids=f"{_SPLITS}:eval_task_ids")   # eval-split ids, only for tvarditi's validation pairs
+    globals()[f"{_p}smoke_grader"] = replace(_g_on, n=2)
+    globals()[f"{_p}smoke_tv"] = replace(_tv, n=2)
+    globals()[f"{_p}smoke_refusal"] = replace(_ref, n=3)
 instances ={k: v for k, v in globals().items() if isinstance(v, EvalCfg)}
 if len(sys.argv) == 1:
     print(f"{bold}{purple}run.py{endc}  ./run.py <name> ...  {gray}the named runs, one after another{endc}")

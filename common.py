@@ -43,8 +43,17 @@ from safetensors import safe_open
 ROOT = Path(__file__).resolve().parent
 VECTORS = ROOT / "data" / "vectors"
 TASKS = {"grader": grader, "secret_number": secret_number, "impossible_bench": lcb, "terminal_verifier": terminal_verifier, "mbpp": mbpp, "hint_mc": hint_mc, "sorh": sorh, "feasigen": feasigen, "toolfail": toolfail, "odcv": odcv, "refusal": refusal}
-TASK_FIELDS = ("config", "n", "family", "system", "prompts", "split", "seed", "mode", "max_turns", "epochs", "sandbox")  # the EvalCfg fields that are task arguments
-ENVS_COMMIT = json.loads(distribution("rhenvs").read_text("direct_url.json"))["vcs_info"]["commit_id"]  # the rhenvs commit uv installed from git
+TASK_FIELDS = ("config", "n", "family", "system", "prompts", "split", "seed", "mode", "max_turns", "epochs", "sandbox", "pool", "pool_size", "offset")  # the EvalCfg fields that are task arguments
+def _envs_commit() -> str:
+    """The rhenvs commit: uv's direct_url.json for a git install, else `git rev-parse HEAD` of the editable checkout (sweep/mission_second_model.md installs ../rh-envs as an editable path)."""
+    info = json.loads(distribution("rhenvs").read_text("direct_url.json") or "{}")
+    if "vcs_info" in info:
+        return info["vcs_info"]["commit_id"]
+    import subprocess
+    from urllib.parse import urlparse
+    path = urlparse(info["url"]).path
+    return "path:" + subprocess.run(["git", "-C", path, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+ENVS_COMMIT = _envs_commit()  # the rhenvs commit uv installed from git, or the editable checkout's HEAD
 SCALINGS = ("row", "unit", "resid_norm")
 INTERVENTION = ("lora", "add_vector", "add_layers", "add_alpha", "add_scaling", "ablate_vector", "ablate_layers", "ablate_row", "ablate_scale", "vectors")
 
@@ -63,6 +72,9 @@ class EvalCfg:
     max_turns: int | None = None  # terminal_verifier: commands per episode
     epochs: int = 1  # terminal_verifier, mbpp, sorh, feasigen, odcv and refusal: samples per task
     sandbox: str | None = None  # terminal_verifier, mbpp: docker (the task default) or local, Inspect's local sandbox for hosts without docker (model-written commands run on the host as the eval's user: an unprivileged one only)
+    pool: str | None = None  # terminal_verifier: seed (the task default) or source_eval, the source's held-out pool (sample ids eval_<seed + 7919>_<index>)
+    pool_size: int | None = None  # terminal_verifier, source_eval: the pool's size (1534 reproduces the Qwen3.8 sweep's pool)
+    offset: int | None = None  # terminal_verifier, source_eval: the first pool item taken (chunking)
     lora: str | None = None  # an adapter the server has loaded under that name
     add_vector: str | None = None  # a vector under data/vectors/<vectors>: each layer of add_layers gets its own row added to its output at every position
     add_layers: list[int] | None = None
@@ -79,6 +91,7 @@ class EvalCfg:
     max_connections: int | None = 64  # concurrent requests, None for Inspect's default
     display: str = "rich"  # Inspect's display: rich is a progress panel, full the full-screen TUI
     score: bool = True  # False: the eval logs the rollouts unscored and ./score.py <log> scores and converts them afterwards, for an env whose judge is slower than the server (a sample holds its place in the eval until its judge answers)
+    keep_ids: str | None = None  # <json file>:<key>: after the task is built, keep only the samples whose id is in that list (sweep/mission_second_model.md: TV collection on the train split of stage 4's splits.json). The env's code is untouched; the dataset is filtered here
     name: str | None = None  # set by run.py from the instance's variable name
 
 
@@ -259,6 +272,14 @@ def build_task(cfg: EvalCfg) -> Task:
     salt = hashlib.sha256(json.dumps([getattr(cfg, field) for field in INTERVENTION]).encode()).hexdigest()
     served = request_body(cfg) | {"cache_salt": salt} if cfg.model.startswith("vllm/") else {"provider": {"only": [cfg.provider], "allow_fallbacks": False}}
     task.config.extra_body = (task.config.extra_body or {}) | served
+    if cfg.keep_ids is not None:
+        from inspect_ai.dataset import MemoryDataset
+        path, key = cfg.keep_ids.rsplit(":", 1)
+        keep = set(json.loads(Path(path).read_text())[key])
+        samples = [s for s in task.dataset if s.id in keep]
+        assert samples, f"{cfg.name}: none of the task's {len(task.dataset)} sample ids is in {cfg.keep_ids}"
+        task.dataset = MemoryDataset(samples, name=task.dataset.name)
+        task.metadata |= {"keep_ids": cfg.keep_ids, "kept": len(samples)}
     task.metadata |= {"condition": condition(cfg), "vectors": cfg.vectors, "cfg": asdict(cfg), "envs_commit": ENVS_COMMIT}
     return task
 
