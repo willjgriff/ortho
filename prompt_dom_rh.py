@@ -336,14 +336,14 @@ def unit_rows(path: Path) -> Tensor:
     """A direction file's per-layer unit rows [65, d] (train_vector.py layout, or stage 4/7/9's direction_unit), rows normalised, zero rows kept zero."""
     saved = load_file(path)
     rows = saved["direction_unit"].float()
-    if rows.ndim == 1: rows = rows[None].expand(65, -1)
+    if rows.ndim == 1: rows = rows[None].expand(N_LAYERS + 1, -1)
     norms = rows.norm(dim=1, keepdim=True)
     return t.where(norms > 0, rows / norms.clamp_min(1e-12), rows)
 
 def hook_rows(name: str) -> Tensor:
     """A served row's hook as per-layer unit rows [65, d] (row L + 1 for decoder layer L)."""
     h = load_file(HOOKS / f"{name}.safetensors")
-    rows = t.zeros(65, D_MODEL)
+    rows = t.zeros(N_LAYERS + 1, D_MODEL)
     layers = h["layers"].tolist()
     for k, L in enumerate(layers): rows[L + 1] = h["u"].float() if h["u"].ndim == 1 else h["u"][k].float()
     return rows
@@ -363,7 +363,7 @@ if STAGE == "cosines":
             per = F.cosine_similarity(dirs[a], dirs[b], dim=1)
             both = (dirs[a].norm(dim=1) > 0) & (dirs[b].norm(dim=1) > 0)
             rows = [i for i in window if both[i]]
-            table[f"{a} | {b}"] = dict(per_layer={i - 1: round(per[i].item(), 4) for i in range(65) if both[i]}, mean_abs_L30_63=per[rows].abs().mean().item() if rows else None, mean_L30_63=per[rows].mean().item() if rows else None, n_layers=len(rows))
+            table[f"{a} | {b}"] = dict(per_layer={i - 1: round(per[i].item(), 4) for i in range(N_LAYERS + 1) if both[i]}, mean_abs_L30_63=per[rows].abs().mean().item() if rows else None, mean_L30_63=per[rows].mean().item() if rows else None, n_layers=len(rows))
     lines = [f"| a | b | mean cos L{STEP[0]}-{N_LAYERS - 1} | mean |cos| | layers |", "|---|---|---|---|---|"] + [f"| {k.split(' | ')[0]} | {k.split(' | ')[1]} | {v['mean_L30_63']:+.3f} | {v['mean_abs_L30_63']:.3f} | {v['n_layers']} |" for k, v in table.items() if v["n_layers"]]
     lines.append(f"\nrandom unit vectors in {D_MODEL} dims: E|cos| {rand_cos.mean():.4f}, 95th percentile {rand_cos.quantile(0.95):.4f} (200 pairs)")
     # held-out AUROC along each R row and its random control, from the fit stage's sidecars
@@ -551,7 +551,7 @@ def first_token_kl(name: str) -> float:
 
 def save_direction(name: str, rows: Tensor, pins: Tensor, window: list[int], meta: dict) -> None:
     """A direction in train_vector.py's layout (data/vectors/.../pd_<name>) and as the hook file ~/hooks/<name>.safetensors (scripts/proj_export.py's rule)."""
-    unit, mean = t.zeros(65, D_MODEL), t.zeros(65, D_MODEL)
+    unit, mean = t.zeros(N_LAYERS + 1, D_MODEL), t.zeros(N_LAYERS + 1, D_MODEL)
     unit[[L + 1 for L in window]] = F.normalize(rows[window].float(), dim=1)
     mean[1:] = pins.float()
     save_file(dict(direction_unit=unit.contiguous(), mean_resid=mean.contiguous()), VEC / f"pd_{name}.safetensors")
@@ -629,8 +629,8 @@ if STAGE == "fit":
             stats["val_auroc"] = {L: a for L, a in enumerate(auroc((vp * dom).sum(-1), (vn * dom).sum(-1)).tolist())}
             rand = F.normalize(t.randn(N_LAYERS, D_MODEL, generator=t.Generator().manual_seed(SEED)), dim=1)
             stats["val_auroc_random"] = {L: a for L, a in enumerate(auroc((vp * rand).sum(-1), (vn * rand).sum(-1)).tolist())}
-            print(f"{cyan}{env}: validation AUROC along the row: " + ", ".join(f"L{L} {stats['val_auroc'][L]:.3f}" for L in range(0, 64, 6)) + "; random rows: " + ", ".join(f"L{L} {stats['val_auroc_random'][L]:.3f}" for L in range(0, 64, 6)) + endc)
-        print(f"{cyan}{env}: |pos mean - neg mean| / |neg mean|: " + ", ".join(f"L{L} {diff[L].norm():.1f} / {mean_neg[L].norm():.0f}" for L in range(0, 64, 6)) + "; gap in neg SDs: " + ", ".join(f"L{L} {stats['gap_over_neg_sd'][L]:.1f}" for L in range(0, 64, 6)) + endc)
+            print(f"{cyan}{env}: validation AUROC along the row: " + ", ".join(f"L{L} {stats['val_auroc'][L]:.3f}" for L in range(0, N_LAYERS, 6)) + "; random rows: " + ", ".join(f"L{L} {stats['val_auroc_random'][L]:.3f}" for L in range(0, N_LAYERS, 6)) + endc)
+        print(f"{cyan}{env}: |pos mean - neg mean| / |neg mean|: " + ", ".join(f"L{L} {diff[L].norm():.1f} / {mean_neg[L].norm():.0f}" for L in range(0, N_LAYERS, 6)) + "; gap in neg SDs: " + ", ".join(f"L{L} {stats['gap_over_neg_sd'][L]:.1f}" for L in range(0, N_LAYERS, 6)) + endc)
         rows = {r: w for r, (e, w) in R_ROWS.items() if e == env}
         meta = dict(env=env, position="last prompt token", direction="positive (hack / impossible) mean minus negative (clean / possible) mean, unit row per decoder layer, no orthogonalisation", pinned_at="the negative class's mean at the same token", **stats)
         for r, window in rows.items(): save_direction(r, dom, mean_neg, window, meta | dict(recipe="R (refdom)", row=r))
