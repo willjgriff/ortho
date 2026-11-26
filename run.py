@@ -428,7 +428,7 @@ for row in ("kto", "mbppkto"):
 # harmful and harmless test prompts, 100 each, off and on, once.
 import os as _os
 from models import MODELS as _MODELS
-_SPLITS = _os.environ.get("PD_TV_SPLITS", "/workspace/llm-reward-hacking-ablation/data/stage4/manifest/tv27b/splits.json")
+_SPLITS = _os.environ.get("PD_TV_SPLITS", "data/splits/tv27b_splits.json")   # a copy of stage 4's splits.json inside each clone (rhbench cannot read /workspace)
 SM_ROWS = ("refdom", "gpdom", "tvpdom", "prand", "refarditi", "zrand", "gparditi", "tvarditi")
 for _m in _MODELS.values():
     if not _m.served_prefix: continue
