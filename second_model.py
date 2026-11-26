@@ -418,7 +418,8 @@ if STAGE == "mech":
     collect = None
     comp_base = {L: t.cat(v) for L, v in got.items()}
     res = dict(window=window, pin=3.0, hooked_layers={L: dict(max_abs_dev_from_pin=(comp_hooked[L] - 3.0).abs().max().item(), base_mean=comp_base[L].mean().item(), base_sd=comp_base[L].std().item()) for L in window}, unhooked_first_layer_change={L: (comp_hooked[L] - comp_base[L]).abs().max().item() for L in range(N_LAYERS) if L not in window and L < window[0]})
-    ok = all(v["max_abs_dev_from_pin"] < 0.05 for v in res["hooked_layers"].values()) and all(v < 1e-3 for v in res["unhooked_first_layer_change"].values())
+    # the hook runs in bf16: a residual coordinate of 8-16 has a bf16 ulp of 0.0625, so the component read back can be off by one ulp (Gemma's residual norms are 230-330 in the window)
+    ok = all(v["max_abs_dev_from_pin"] < 0.125 for v in res["hooked_layers"].values()) and all(v < 1e-3 for v in res["unhooked_first_layer_change"].values())
     res["passed"] = ok
     print(f"{green if ok else red}mech: component along u at hooked layers = pin 3.0 within {max(v['max_abs_dev_from_pin'] for v in res['hooked_layers'].values()):.4f}; layers before the window unchanged within {max(res['unhooked_first_layer_change'].values()):.2e}: {'PASS' if ok else 'FAIL'}{endc}")
     (OUT / "mech.json").write_text(json.dumps(res, indent=1)); sys.exit()
