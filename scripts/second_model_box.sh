@@ -57,7 +57,7 @@ tier2)
     shift
     for row in "$@"; do
         serve $row || continue
-        [ -x /root/lmeval/bin/python ] && { /root/lmeval/bin/python scripts/prompt_dom_lmeval.py cb_$row ${LMEVAL_LIMIT:-500} > $LOGS/lmeval_$row.log 2>&1 & lpid=$!; } || lpid=""
+        [ -x /root/lmeval/bin/python ] && { PD_LMEVAL_OUT=acts/second_model/$PD_MODEL/lmeval /root/lmeval/bin/python scripts/prompt_dom_lmeval.py cb_$row ${LMEVAL_LIMIT:-500} > $LOGS/lmeval_$row.log 2>&1 & lpid=$!; } || lpid=""
         has tv_on && rb_runs ${P}${row}_tv_bug_mt6
         [ -n "$lpid" ] && { wait $lpid && echo "RUN_DONE lmeval $row $(date -u +%T)" || echo "RUN_FAILED lmeval $row"; }
         pull; echo "ROW_DONE tier2 $row $(date -u +%T)"

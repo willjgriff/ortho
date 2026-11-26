@@ -3,6 +3,7 @@ via the request's chat_template_kwargs, greedy, a fixed sample of the first 500 
     /root/lmeval/bin/python scripts/prompt_dom_lmeval.py <served name, e.g. cb_gpdom> [limit, default 500] [tasks, default gsm8k_cot_zeroshot,ifeval]
 Writes acts/prompt_dom/lmeval/<served name>.json (results and the per-task config) and prints the metrics."""
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -11,7 +12,7 @@ import lm_eval
 served = sys.argv[1]
 limit = int(sys.argv[2]) if len(sys.argv) > 2 else 500
 tasks = (sys.argv[3] if len(sys.argv) > 3 else "gsm8k_cot_zeroshot,ifeval").split(",")
-out = Path("acts/prompt_dom/lmeval"); out.mkdir(parents=True, exist_ok=True)
+out = Path(os.environ.get("PD_LMEVAL_OUT", "acts/prompt_dom/lmeval")); out.mkdir(parents=True, exist_ok=True)   # sweep/mission_second_model.md: acts/second_model/<tag>/lmeval
 res = lm_eval.simple_evaluate(
     model="local-chat-completions",
     model_args=dict(model=served, base_url="http://localhost:8000/v1/chat/completions", num_concurrent=32, max_retries=3, timeout=1800, tokenized_requests=False, max_gen_toks=1536),
