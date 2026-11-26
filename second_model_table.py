@@ -14,7 +14,9 @@ RUN_KEYS = ("grader_off_clean", "grader_off_heldout", "grader_off", "grader_on_c
 ROWS = ["base", "refdom", "gpdom", "tvpdom", "prand", "refarditi", "zrand", "gparditi", "tvarditi"]
 
 def load(env: str) -> list[dict]:
-    return [json.loads(line) for path in sorted((Path("data/inspect") / env).glob("*.jsonl")) for line in path.open()]
+    """The env's records without the smoke runs (cfg.n below 10)."""
+    rs = [json.loads(line) for path in sorted((Path("data/inspect") / env).glob("*.jsonl")) for line in path.open()]
+    return [r for r in rs if not (r.get("cfg", {}).get("n") is not None and r["cfg"]["n"] < 10)]
 
 def rate(k: int, n: int) -> str:
     if not n: return "-"
