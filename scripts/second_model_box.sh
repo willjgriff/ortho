@@ -84,7 +84,7 @@ tier2)
         serve $row || continue
         if [ "$row" = base ]; then tv="sm_tv_on_bug_mt6"; else tv="${row}_sm_tv_on_bug_mt6"; fi
         if [ -x /root/lmeval/bin/python ]; then /root/lmeval/bin/python scripts/prompt_dom_lmeval.py cb_$row ${LMEVAL_LIMIT:-500} > $LOGS/lmeval_$row.log 2>&1 & lpid=$!; else lpid=""; echo "no /root/lmeval venv: GSM8K/IFEval not run for $row"; fi
-        rb_runs $tv
+        [ "${SM_SKIP_TV:-0}" = 1 ] || rb_runs $tv
         [ -n "$lpid" ] && { wait $lpid && echo "RUN_DONE lmeval $row $(date -u +%T)" || echo "RUN_FAILED lmeval $row (see $LOGS/lmeval_$row.log)"; }
         pull
         echo "ROW_DONE tier2 $row $(date -u +%T)"
