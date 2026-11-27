@@ -29,6 +29,22 @@ dose)
         echo "$out" | grep -q "works True" && { echo "WORKING_DOSE $dir $s $(date -u +%T)"; exit 0; }
     done
     echo "NO_WORKING_DOSE $dir (kept at s = 1) $(date -u +%T)";;
+grid)
+    # grid <row> [flags]: GE_SKIP_AGENTIC=1 skips data_entry / overclaim, GE_SKIP_GSMON=1 skips GSM8K-on, GE_SKIP_GRADER=1 skips the Grader runs
+    row=$2
+    bash scripts/gemma_envs_box.sh serve $row >> $LOGS/grid_$row.log 2>&1 || { echo "SERVE_FAILED $row"; exit 1; }
+    echo "GRID_START $row $(date -u +%T)"
+    pids=""
+    bash scripts/gemma_envs_box.sh rb $row mbpp_grid nishi_rs_grid nishi_sycophancy_fact_grid nishi_sycophancy_opinion_nlp_grid nishi_sycophancy_opinion_political_grid nishi_world_affecting_approval_grid nishi_world_affecting_reward_grid toolfail_grid & pids="$pids $!"
+    if [ "${GE_SKIP_AGENTIC:-0}" != 1 ]; then bash scripts/gemma_envs_box.sh rb $row dataentry_grid & pids="$pids $!"; bash scripts/gemma_envs_box.sh rb $row overclaim_grid & pids="$pids $!"; fi
+    [ "${GE_SKIP_GRADER:-0}" != 1 ] && { GE_ROWS=$row ./run.py ${row}_ge_g_on_main ${row}_ge_g_on_heldout > $LOGS/run_${row}_ge_grader.log 2>&1 || echo "RUN_FAILED grader $row"; } &
+    pids="$pids $!"
+    LMEVAL_OUT=acts/gemma_envs/lmeval /root/lmeval/bin/python scripts/prompt_dom_lmeval.py cb_$row 500 > $LOGS/lmeval_$row.log 2>&1 & pids="$pids $!"
+    [ "${GE_SKIP_GSMON:-0}" != 1 ] && { .venv/bin/python gemma_envs/gsm8k_on.py cb_$row 250 > $LOGS/gsm8k_on_$row.log 2>&1 || echo "RUN_FAILED gsm8k_on $row"; } &
+    pids="$pids $!"
+    wait $pids
+    bash scripts/gemma_envs_box.sh pull > /dev/null
+    echo "ROW_DONE grid $row $(date -u +%T)";;
 serve) bash scripts/gemma_envs_box.sh serve $2;;
 *) sed -n 2,8p "$0"; exit 1;;
 esac

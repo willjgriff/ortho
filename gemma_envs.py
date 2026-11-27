@@ -151,14 +151,14 @@ add("toolfail_grid", "toolfail", "main", prompts="tool_required", n=14)   # eval
 # read within the first few commands); the config's 1800 s limit. 150 train + 50 eval episodes (fewer than the 400 maximum: these are agentic episodes; LOG 14:25).
 add("dataentry_cap_main_train", "data_entry", "main", ids="dataentry:train:150", prompts="fallback", n=500, seed=0, message_limit=16, conns=32)
 add("dataentry_cap_main_eval", "data_entry", "main", ids="dataentry:eval:50", prompts="fallback", n=500, seed=0, message_limit=16, conns=32)
-add("dataentry_dose", "data_entry", "main", ids="dataentry:eval:64", prompts="fallback", n=500, seed=0, conns=32)
-add("dataentry_grid", "data_entry", "main", ids="dataentry:eval:100", prompts="fallback", n=500, seed=0, conns=32)
+add("dataentry_dose", "data_entry", "main", ids="dataentry:eval:64", prompts="fallback", n=500, seed=0, conns=24)
+add("dataentry_grid", "data_entry", "main", ids="dataentry:eval:100", prompts="fallback", n=500, seed=0, conns=24)
 
 # overclaim pairs (cue in the opening list_files output): main-arm episodes stopped after 4 messages (user, the list_files call, its output, the second reply), 150 train + 50 eval
 add("overclaim_cap_main_train", "overclaim", "main", ids="overclaim:train:150", prompts="main", n=500, message_limit=4, conns=48)
 add("overclaim_cap_main_eval", "overclaim", "main", ids="overclaim:eval:50", prompts="main", n=500, message_limit=4, conns=48)
-add("overclaim_dose", "overclaim", "main", ids="overclaim:eval:64", prompts="main", n=500, time_limit=1800, conns=32)
-add("overclaim_grid", "overclaim", "main", ids="overclaim:eval:100", prompts="main", n=500, time_limit=1800, conns=32)
+add("overclaim_dose", "overclaim", "main", ids="overclaim:eval:64", prompts="main", n=500, time_limit=1800, conns=28)
+add("overclaim_grid", "overclaim", "main", ids="overclaim:eval:100", prompts="main", n=500, time_limit=1800, conns=28)
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
