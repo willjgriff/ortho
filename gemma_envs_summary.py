@@ -60,10 +60,39 @@ def main() -> None:
     lines += ["", "### Every run", "", T.table(rows)]
     (REPORT / "screen_table.md").write_text("\n".join(lines) + "\n")
     (REPORT / "screen_verdicts.json").write_text(json.dumps(verdicts, indent=1))
+    lines += [""] + partb()
     head = (REPORT / "HEAD.md").read_text() if (REPORT / "HEAD.md").exists() else ""
     notes = (REPORT / "NOTES.md").read_text() if (REPORT / "NOTES.md").exists() else ""
     (REPORT / "SUMMARY.md").write_text(head + "\n" + "\n".join(lines) + "\n\n" + notes)
     print("\n".join(lines[:4 + len(units)]))
+
+def partb() -> list[str]:
+    """Part B sections from the files on disk: pairs per filter step, held-out AUROC, cosines, KL and doses, control doses, the grid."""
+    ge = Path("/root/ortho/acts/gemma_envs")
+    out = ["## Part B", "", "### Pairs (counts at each filter step; train / eval split ids)", ""]
+    for m in sorted((ge / "pairs").glob("*_manifest.json")):
+        d = json.loads(m.read_text())
+        out.append(f"- **{d['unit']}** ({d['env']}): " + "; ".join(f"{k}: " + ", ".join(f"{a} {b}" for a, b in v.items()) for k, v in d["counts"].items()))
+    out += ["", "### Directions: held-out AUROC along each R row (eval pairs; random rows in brackets)", "", "| direction | " + " | ".join(f"L{L}" for L in (28, 31, 34, 37, 40, 43, 46, 49, 52, 55)) + " | n pos / neg (fit) | n val |", "|---" * 13 + "|"]
+    for v in sorted(Path("/root/ortho/data/vectors/gemma4_31b/envs").glob("sm_*.json")):
+        d = json.loads(v.read_text())
+        if "val_auroc" not in d: continue
+        a, r = d["val_auroc"], d.get("val_auroc_random", {})
+        out.append(f"| {d['name']} | " + " | ".join(f"{a[str(L)]:.3f} ({r.get(str(L), float('nan')):.2f})" for L in d["layers"]) + f" | {d.get('n_pos')} / {d.get('n_neg')} | {d.get('n_val_pos', '-')} |")
+    if (ge / "cosines.md").exists(): out += ["", "### Cosines (per layer on the R window)", "", (ge / "cosines.md").read_text()]
+    if (ge / "kl.json").exists():
+        kl = json.loads((ge / "kl.json").read_text())
+        out += ["", "### First-token KL (heretic's 100 harmless test prompts) by hook scale s", "", "| row | " + " | ".join(["s"] * 1) + " → KL |", "|---|---|"]
+        for row, d in kl.items(): out.append(f"| {row} | " + ", ".join(f"{float(k):g} → {v:.3f}" for k, v in sorted(d.items(), key=lambda x: float(x[0]))) + " |")
+    st = json.loads((REPORT / "STATE.json").read_text()) if (REPORT / "STATE.json").exists() else {}
+    if st.get("doses"):
+        out += ["", "### Doses (own-env check on 64 eval ids; gpdom: held-out Grader, 5 per side)", ""] + [f"- {k}: {v}" for k, v in st["doses"].items()]
+    if st.get("control_doses"):
+        out += ["", "### Control doses", ""] + [f"- {k}: {v}" for k, v in st["control_doses"].items()]
+    if (ge / "grid.md").exists():
+        out += ["", "### The grid (hack among valid [Wilson 95%]; Δ and exact McNemar p vs base by sample id; p vs the row's langdom control; Grader p = exact cluster sign-flip over family sides; the diagonal in bold)", "", (ge / "grid.md").read_text()]
+    return out
+
 
 if __name__ == "__main__":
     main()
