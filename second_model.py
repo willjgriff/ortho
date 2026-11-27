@@ -581,7 +581,7 @@ if STAGE == "gekl":   # gekl <row> <s> [<s> ...]: first-token KL on heretic's ha
             path.write_text(json.dumps(kl, indent=1))
     sys.exit()
 
-if STAGE == "gebisect":   # gebisect <row> <target KL> <name>: the scale whose KL is within 15% of the target (bisection on s in (0, 4]), written as the hook ~/hooks/<name>.safetensors
+if STAGE == "gebisect":   # gebisect <row> <target KL> <name>: the scale whose KL is within 15% of the target (bisection on s in (0, 64]), written as the hook ~/hooks/<name>.safetensors
     row, target, name = ARGS[0], float(ARGS[1]), ARGS[2]
     path = GE / "kl.json"
     kl = json.loads(path.read_text()) if path.exists() else {}
@@ -589,7 +589,7 @@ if STAGE == "gebisect":   # gebisect <row> <target KL> <name>: the scale whose K
     while True:   # grow hi until KL(hi) >= target
         v = ge_kl(row, hi); trace.append((hi, v)); kl.setdefault(row, {})[f"{hi:.4f}"] = v
         if abs(v - target) <= 0.15 * target: found = (hi, v); break
-        if v >= target or hi >= 4.0: break
+        if v >= target or hi >= 64.0: break
         lo, hi = hi, hi * 2
     for _ in range(16):
         if found: break

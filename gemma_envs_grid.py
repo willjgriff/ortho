@@ -34,6 +34,8 @@ def mcnemar(a: dict, b: dict) -> tuple:
 
 def env_cells(served: str, unit: tuple) -> dict | None:
     label, env, runs, base_run = unit
+    if not isinstance(runs, list) and (PULLED / served / env / runs.replace("_grid", "_gridrest") / "records.jsonl").exists():
+        runs = [runs.replace("_grid", "_dose"), runs.replace("_grid", "_gridrest")]   # a direction row's own env: its dose check (eval ids 0-63) + the rest
     runs = runs if isinstance(runs, list) else [base_run if (served == "base" and base_run) else runs]
     out, honest = {}, []
     found = False

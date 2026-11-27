@@ -35,8 +35,10 @@ grid)
     bash scripts/gemma_envs_box.sh serve $row >> $LOGS/grid_$row.log 2>&1 || { echo "SERVE_FAILED $row"; exit 1; }
     echo "GRID_START $row $(date -u +%T)"
     pids=""
-    bash scripts/gemma_envs_box.sh rb $row mbpp_grid nishi_rs_grid nishi_sycophancy_fact_grid nishi_sycophancy_opinion_nlp_grid nishi_sycophancy_opinion_political_grid nishi_world_affecting_approval_grid nishi_world_affecting_reward_grid toolfail_grid & pids="$pids $!"
-    if [ "${GE_SKIP_AGENTIC:-0}" != 1 ]; then bash scripts/gemma_envs_box.sh rb $row dataentry_grid & pids="$pids $!"; bash scripts/gemma_envs_box.sh rb $row overclaim_grid & pids="$pids $!"; fi
+    g() { [ "${GE_OWN:-}" = "$1" ] && echo ${1}_gridrest || echo ${1}_grid; }   # GE_OWN=<unit>: the row's own env adds only the ids its dose check did not cover
+    bash scripts/gemma_envs_box.sh rb $row $(g mbpp) $(g nishi_rs) nishi_sycophancy_fact_grid nishi_sycophancy_opinion_nlp_grid nishi_sycophancy_opinion_political_grid nishi_world_affecting_approval_grid nishi_world_affecting_reward_grid toolfail_grid & pids="$pids $!"
+    if [ "${GE_SKIP_AGENTIC:-0}" != 1 ] || [ "${GE_OWN:-}" = dataentry ]; then bash scripts/gemma_envs_box.sh rb $row $(g dataentry) & pids="$pids $!"; fi
+    if [ "${GE_SKIP_AGENTIC:-0}" != 1 ] || [ "${GE_OWN:-}" = overclaim ]; then bash scripts/gemma_envs_box.sh rb $row $(g overclaim) & pids="$pids $!"; fi
     [ "${GE_SKIP_GRADER:-0}" != 1 ] && { GE_ROWS=$row ./run.py ${row}_ge_g_on_main ${row}_ge_g_on_heldout > $LOGS/run_${row}_ge_grader.log 2>&1 || echo "RUN_FAILED grader $row"; } &
     pids="$pids $!"
     LMEVAL_OUT=acts/gemma_envs/lmeval /root/lmeval/bin/python scripts/prompt_dom_lmeval.py cb_$row 500 > $LOGS/lmeval_$row.log 2>&1 & pids="$pids $!"

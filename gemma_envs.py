@@ -45,9 +45,9 @@ def arm_id(main_id: str, arm_suffix: str | None) -> str:
 
 def run_ids(spec: dict) -> list | None:
     if not spec.get("ids"): return None
-    unit, split, *k = spec["ids"].split(":")
+    unit, split, *k = spec["ids"].split(":")   # <unit>:<split>[:<k>] the first k ids, or [:<a>:<b>] ids a..b-1
     d = json.loads((SPLITS / f"{unit}.json").read_text())
-    ids = d[split][: int(k[0])] if k else d[split]
+    ids = d[split][int(k[0]): int(k[1])] if len(k) == 2 else d[split][: int(k[0])] if k else d[split]
     return [arm_id(i, d.get("arm_suffix", {}).get(spec["arm"])) for i in ids]
 
 # Main arm in two batches where the env takes an offset (gate batch _main50 = tasks 0-49, then _mainB = the next 150 or 50 tasks), else a fresh
@@ -159,6 +159,12 @@ add("overclaim_cap_main_train", "overclaim", "main", ids="overclaim:train:150", 
 add("overclaim_cap_main_eval", "overclaim", "main", ids="overclaim:eval:50", prompts="main", n=500, message_limit=4, conns=48)
 add("overclaim_dose", "overclaim", "main", ids="overclaim:eval:64", prompts="main", n=500, time_limit=1800, conns=28)
 add("overclaim_grid", "overclaim", "main", ids="overclaim:eval:100", prompts="main", n=500, time_limit=1800, conns=28)
+
+# the grid's remainder for a direction row: its dose check at the working dose already holds the first 64 eval ids, so the grid adds ids 64..199 / 64..99
+add("mbpp_gridrest", "mbpp", "main", ids="mbpp:eval:64:200", n=None, sandbox="local")
+add("nishi_rs_gridrest", "nishimura", "main", ids="nishi_rs:eval:64:200", prompts="reward_hack", dataset="revealing_score", n=None, seed=0)
+add("dataentry_gridrest", "data_entry", "main", ids="dataentry:eval:64:100", prompts="fallback", n=500, seed=0, conns=24)
+add("overclaim_gridrest", "overclaim", "main", ids="overclaim:eval:64:100", prompts="main", n=500, time_limit=1800, conns=28)
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
