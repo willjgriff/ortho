@@ -572,12 +572,13 @@ def ge_kl(row: str, scale: float) -> float:
 if STAGE == "gekl":   # gekl <row> <s> [<s> ...]: first-token KL on heretic's harmless test prompts under the row's hook scaled by s; acts/gemma_envs/kl.json
     path = GE / "kl.json"
     kl = json.loads(path.read_text()) if path.exists() else {}
-    row = ARGS[0]
-    for s in map(float, ARGS[1:]):
-        v = ge_kl(row, s)
-        kl.setdefault(row, {})[f"{s:.4f}"] = v
-        print(f"{cyan}{row} s={s:.4f}: first-token KL {v:.4f}{endc}")
-        path.write_text(json.dumps(kl, indent=1))
+    specs = [a.split(":") for a in ARGS] if ":" in ARGS[0] else [[ARGS[0], ",".join(ARGS[1:])]]   # <row>:<s>,<s> ... or <row> <s> ...
+    for row, ss in specs:
+        for s in map(float, ss.split(",")):
+            v = ge_kl(row, s)
+            kl.setdefault(row, {})[f"{s:.4f}"] = v
+            print(f"{cyan}{row} s={s:.4f}: first-token KL {v:.4f}{endc}")
+            path.write_text(json.dumps(kl, indent=1))
     sys.exit()
 
 if STAGE == "gebisect":   # gebisect <row> <target KL> <name>: the scale whose KL is within 15% of the target (bisection on s in (0, 4]), written as the hook ~/hooks/<name>.safetensors

@@ -11,7 +11,8 @@ import lm_eval
 served = sys.argv[1]
 limit = int(sys.argv[2]) if len(sys.argv) > 2 else 500
 tasks = (sys.argv[3] if len(sys.argv) > 3 else "gsm8k_cot_zeroshot,ifeval").split(",")
-out = Path("acts/prompt_dom/lmeval"); out.mkdir(parents=True, exist_ok=True)
+import os
+out = Path(os.environ.get("LMEVAL_OUT", "acts/prompt_dom/lmeval")); out.mkdir(parents=True, exist_ok=True)
 res = lm_eval.simple_evaluate(
     model="local-chat-completions",
     model_args=dict(model=served, base_url="http://localhost:8000/v1/chat/completions", num_concurrent=32, max_retries=3, timeout=1800, tokenized_requests=False, max_gen_toks=1536),

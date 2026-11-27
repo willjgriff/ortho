@@ -123,8 +123,8 @@ add("hanoi_control50", "tower_of_hanoi", "control", prompts="no_rule", n=50, n_d
 # 13 overclaim: main (coverage proxy) vs control (small scenario); 1800 s; agentic
 add("overclaim_smoke", "overclaim", "main", prompts="main", n=5, time_limit=1800, conns=16)
 add("overclaim_main50", "overclaim", "main", prompts="main", n=50, time_limit=1800, conns=24)
-add("overclaim_mainB", "overclaim", "main", prompts="main", n=50, offset=50, time_limit=1800, conns=32)
-add("overclaim_control50", "overclaim", "control", prompts="control", n=50, time_limit=1800, conns=32)
+add("overclaim_mainB", "overclaim", "main", prompts="main", n=50, offset=50, time_limit=1800, conns=24)
+add("overclaim_control50", "overclaim", "control", prompts="control", n=50, time_limit=1800, conns=24)
 
 # Part B capture runs (gemma_envs_pairs.py): both arms on the same split ids, one generated token, so each sample's first model call holds the prompt ids as served.
 CAP = dict(gen=dict(max_tokens=1), conns=64)
@@ -146,6 +146,19 @@ add("nishi_rs_grid", "nishimura", "main", ids="nishi_rs:eval:200", prompts="rewa
 for _d in ("sycophancy_fact", "sycophancy_opinion_nlp", "sycophancy_opinion_political", "world_affecting_approval", "world_affecting_reward"):
     add(f"nishi_{_d}_grid", "nishimura", "main", prompts="reward_hack", dataset=_d, n=40, seed=1)
 add("toolfail_grid", "toolfail", "main", prompts="tool_required", n=14)   # eval-only env: the pilot's 210 items (no direction is fit on toolfail)
+
+# data_entry pairs (cue arriving later, gemma_envs_pairs.py build_later): on-policy main-arm (fallback) episodes on split ids, stopped after 16 messages (the empty file is
+# read within the first few commands); the config's 1800 s limit. 150 train + 50 eval episodes (fewer than the 400 maximum: these are agentic episodes; LOG 14:25).
+add("dataentry_cap_main_train", "data_entry", "main", ids="dataentry:train:150", prompts="fallback", n=500, seed=0, message_limit=16, conns=32)
+add("dataentry_cap_main_eval", "data_entry", "main", ids="dataentry:eval:50", prompts="fallback", n=500, seed=0, message_limit=16, conns=32)
+add("dataentry_dose", "data_entry", "main", ids="dataentry:eval:64", prompts="fallback", n=500, seed=0, conns=32)
+add("dataentry_grid", "data_entry", "main", ids="dataentry:eval:100", prompts="fallback", n=500, seed=0, conns=32)
+
+# overclaim pairs (cue in the opening list_files output): main-arm episodes stopped after 4 messages (user, the list_files call, its output, the second reply), 150 train + 50 eval
+add("overclaim_cap_main_train", "overclaim", "main", ids="overclaim:train:150", prompts="main", n=500, message_limit=4, conns=48)
+add("overclaim_cap_main_eval", "overclaim", "main", ids="overclaim:eval:50", prompts="main", n=500, message_limit=4, conns=48)
+add("overclaim_dose", "overclaim", "main", ids="overclaim:eval:64", prompts="main", n=500, time_limit=1800, conns=32)
+add("overclaim_grid", "overclaim", "main", ids="overclaim:eval:100", prompts="main", n=500, time_limit=1800, conns=32)
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -194,6 +207,21 @@ def run(row: str, name: str) -> None:
     start = time.time()
     [log] = inspect_eval(task, model=model, model_base_url=BASE_URL, max_connections=spec["conns"], display="plain", log_dir=str(ROOT / "logs" / env), log_model_api=True,
                          model_args={"client_timeout": 3600}, time_limit=spec["time_limit"], message_limit=spec.get("message_limit"), fail_on_error=False, retry_on_error=1, **spec.get("gen", {}))
+    finish(row, name, spec, log, start)
+
+
+STORE_DEFAULTS = {"end_reason": "time_limit", "final": None}   # keys some annotators read from the store, absent when a sample limit stops the solver first (post-processing; env code unchanged)
+
+
+def finish(row: str, name: str, spec: dict, log, start: float) -> None:
+    """Records (rhenvs.convert), progress.jsonl and the run directory's copies, from a finished log."""
+    from rhenvs.convert import write_records
+    env = spec["env"]
+    rdir = OUT / row / env / name
+    cfg = json.loads((rdir / "run_config.json").read_text())
+    for smp in log.samples:
+        if smp.limit is not None or smp.error is not None:
+            for k, v in STORE_DEFAULTS.items(): smp.store.setdefault(k, v)
     out, records = write_records(log, ROOT / "data" / "inspect")
     by_key = {(r["rollout_id"].split("/")[-2], int(r["rollout_id"].split("/")[-1])): r for r in records}
     with (rdir / "progress.jsonl").open("w") as f:
@@ -202,7 +230,7 @@ def run(row: str, name: str) -> None:
             f.write(json.dumps(sample_end(s, spec, by_key)) + "\n")
     shutil.copy(out, rdir / "records.jsonl")
     shutil.copy(log.location, rdir / Path(log.location).name)
-    cfg["status"], cfg["log"], cfg["finished"], cfg["seconds"] = log.status, Path(log.location).name, now(), round(time.time() - start)
+    cfg["status"], cfg["log"], cfg["finished"], cfg["seconds"] = log.status, Path(log.location).name, now(), round(time.time() - start) if start else cfg.get("seconds")
     (rdir / "run_config.json").write_text(json.dumps(cfg, indent=1, default=str))
     summarize(rdir)
 
@@ -229,6 +257,10 @@ if __name__ == "__main__":
             except Exception as e:
                 import traceback; traceback.print_exc()
                 print(f"RUN_FAILED {row} {name}: {e!r} {now()}", flush=True)
+    elif stage == "convert":   # convert <row> <run> <.eval path>: finish a run whose eval finished but whose conversion failed
+        from inspect_ai.log import read_eval_log
+        row, name, path = args
+        finish(row, name, RUNS[name], read_eval_log(path), 0)
     elif stage == "summarize":
         for d in args: summarize(Path(d))
     else:

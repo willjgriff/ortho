@@ -26,6 +26,7 @@ def unit(row: dict) -> str:
 
 def main() -> None:
     dirs = sorted(p.parent for p in ROOT.glob("base/*/*/run_config.json") if (p.parent / "records.jsonl").exists())
+    dirs = [d for d in dirs if not any(x in d.name for x in ("_cap_", "_dose", "_grid", "_smoke2"))]   # the screen only (Part B runs are tabled separately)
     rows = [T.run_row(d) for d in dirs]
     units = {}
     for r in rows: units.setdefault(unit(r), []).append(r)

@@ -1,0 +1,34 @@
+#!/bin/bash
+# sweep/mission_gemma_envs.md Part B, as root from /root/ortho: bash scripts/gemma_envs_partb.sh <stage> [args]. Logs under /root/gemma_envs_out/logs/.
+#   fits <unit> ...          vLLM stopped; second_model.py gefit <unit> ... langdom covrand; first-token KL of every env direction and gpdom at s 0.25 / 0.5 / 1, langdom / covrand at
+#                            s 0.25 0.5 1 2 (the control curves); cosines between every direction (gecos)
+#   dose <dir> <run> <kind>  the working dose: for s in 0.25 0.5 1, serve <dir> scaled by s as <dir>_sXXX and run its own env's dose check (<run>: a gemma_envs.py run as rhbench,
+#                            kind env; or the Grader held-out check, kind grader); prints DOSE lines (the decision is made by gemma_envs_dose.py)
+#   serve <row>              serve a row (hook ~/hooks/<row>.safetensors)
+cd ~/ortho
+export SM_MODEL=gemma4_31b PATH=$HOME/.local/bin:$PATH
+LOGS=/root/gemma_envs_out/logs; mkdir -p $LOGS
+stop_vllm() { tmux kill-session -t vllm 2>/dev/null; for _ in $(seq 30); do curl -sf -m 2 localhost:8000/v1/models > /dev/null || break; sleep 2; done; sleep 5; }
+case $1 in
+fits)
+    shift
+    stop_vllm
+    .venv/bin/python second_model.py gefit "$@" langdom covrand > $LOGS/hf_fits.log 2>&1 || { echo "FITS_FAILED (see $LOGS/hf_fits.log)"; exit 1; }
+    .venv/bin/python second_model.py gekl $(for u in "$@"; do printf '%sdom:0.25,0.5,1 ' $u; done) gpdom:0.25,0.5,1 refdom:1 langdom:0.25,0.5,1,2 covrand:0.25,0.5,1,2 > $LOGS/hf_kl.log 2>&1
+    .venv/bin/python second_model.py gecos $(for u in "$@"; do printf '%sdom ' $u; done) gpdom refdom langdom covrand > $LOGS/hf_cos.log 2>&1
+    echo "STAGE_DONE fits $(date -u +%T)";;
+dose)
+    dir=$2; run=$3
+    for s in 0.25 0.5 1; do
+        name=${dir}_s$(echo $s | tr -d .)
+        .venv/bin/python gemma_envs/scale_hook.py $dir $s $name >> $LOGS/dose_$dir.log 2>&1
+        bash scripts/gemma_envs_box.sh serve $name >> $LOGS/dose_$dir.log 2>&1 || { echo "SERVE_FAILED $name"; continue; }
+        if [ "$run" = grader ]; then GE_ROWS=$name ./run.py ${name}_ge_g_dose > $LOGS/run_${name}_ge_g_dose.log 2>&1; out=$(.venv/bin/python gemma_envs_dose.py $name grader 2>/dev/null | grep DOSE)
+        else bash scripts/gemma_envs_box.sh rb $name $run; bash scripts/gemma_envs_box.sh pull > /dev/null; out=$(.venv/bin/python gemma_envs_dose.py $name env $run 2>/dev/null | grep DOSE); fi
+        echo "$out $(date -u +%T)"
+        echo "$out" | grep -q "works True" && { echo "WORKING_DOSE $dir $s $(date -u +%T)"; exit 0; }
+    done
+    echo "NO_WORKING_DOSE $dir (kept at s = 1) $(date -u +%T)";;
+serve) bash scripts/gemma_envs_box.sh serve $2;;
+*) sed -n 2,8p "$0"; exit 1;;
+esac
