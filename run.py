@@ -448,6 +448,7 @@ sm_smoke_g_off = replace(sm_g_off_main, n=2)
 sm_smoke_tv = replace(sm_tv_on_bug, n=4)
 sm_smoke_ref = replace(sm_ref_on_harmful, n=4)
 sm_smoke_ref_off = replace(sm_ref_off_harmful, n=4)
+ge_g_on_main32 = replace(sm_g_on_main, n=32)   # sweep/mission_gemma_envs.md Phase 0: the sanity check of the fresh box against the previous pilot's 41.6% (Grader on, main families, 32 per side per family)
 SM_EVALS = dict(g_off_main=sm_g_off_main, g_off_heldout=sm_g_off_heldout, g_on_main=sm_g_on_main, g_on_heldout=sm_g_on_heldout, tv_on_bug=sm_tv_on_bug, tv_on_pos=sm_tv_on_pos, tv_off_bug=sm_tv_off_bug, tv_off_pos=sm_tv_off_pos, tv_on_bug_mt6=sm_tv_on_bug_mt6,
                 ref_off_harmful=sm_ref_off_harmful, ref_off_harmless=sm_ref_off_harmless, ref_on_harmful=sm_ref_on_harmful, ref_on_harmless=sm_ref_on_harmless)
 SM_ROWS = ("refdom", "gpdom", "tvpdom", "prand", "prandk_ref", "prandk_gp", "refarditi", "zrand", "gparditi", "tvarditi")   # prandk_*: KL-matched random controls (box G update 1)

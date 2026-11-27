@@ -5,7 +5,7 @@
 # Knobs: MAX_NUM_SEQS (default 80: at 128 the KV cache ran at 99.8% with 50 requests waiting and 4,234 preemptions in the pilot; the cache holds about 75 of these long requests), MAX_MODEL_LEN (default 131072), GPU_MEMORY_UTILIZATION (default 0.95), PLAIN=1 serves without the plugin (RHABLATION_PROJ unset) for the equivalence check.
 row=$1
 case ${SM_MODEL:-gemma4_31b} in
-gemma4_31b) MODEL=google/gemma-4-31B-it; REVISION=842da3794eaa0b77d5f08bae87a17459d91ff475; FLAGS="--reasoning-parser gemma4 --language-model-only";;   # multimodal checkpoint served text-only; no tool parser (no env sends tools)
+gemma4_31b) MODEL=google/gemma-4-31B-it; REVISION=842da3794eaa0b77d5f08bae87a17459d91ff475; FLAGS="--reasoning-parser gemma4 --language-model-only --enable-auto-tool-choice --tool-call-parser gemma4";;   # multimodal checkpoint served text-only; tool parser for the tool-calling envs of sweep/mission_gemma_envs.md (data_entry, revert, hanoi, overclaim)
 *) echo "unknown SM_MODEL ${SM_MODEL}"; exit 1;;
 esac
 tmux kill-session -t vllm 2>/dev/null
