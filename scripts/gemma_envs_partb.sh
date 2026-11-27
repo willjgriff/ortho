@@ -47,6 +47,21 @@ grid)
     wait $pids
     bash scripts/gemma_envs_box.sh pull > /dev/null
     echo "ROW_DONE grid $row $(date -u +%T)";;
+controls)
+    # controls <K_lo> <K_hi>: vLLM stopped; langdom and covrand scaled to each target KL (bisection, ±15%) as langdom_klo / langdom_khi / covrand_klo / covrand_khi; covrand's Grader validity
+    stop_vllm
+    for c in langdom covrand; do
+        .venv/bin/python second_model.py gebisect $c $2 ${c}_klo >> $LOGS/hf_controls.log 2>&1
+        .venv/bin/python second_model.py gebisect $c $3 ${c}_khi >> $LOGS/hf_controls.log 2>&1
+    done
+    .venv/bin/python second_model.py gevalid covrand_klo covrand_khi >> $LOGS/hf_controls.log 2>&1
+    echo "STAGE_DONE controls $(date -u +%T)";;
+checks)
+    # checks <row> ...: vLLM stopped; MMLU (every 4th test question) and first-token KL under each row's hook (second_model.py check)
+    shift
+    stop_vllm
+    .venv/bin/python second_model.py check base "$@" > $LOGS/hf_checks.log 2>&1 || echo "CHECKS_FAILED"
+    echo "STAGE_DONE checks $(date -u +%T)";;
 serve) bash scripts/gemma_envs_box.sh serve $2;;
 *) sed -n 2,8p "$0"; exit 1;;
 esac

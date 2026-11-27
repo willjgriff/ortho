@@ -581,6 +581,29 @@ if STAGE == "gekl":   # gekl <row> <s> [<s> ...]: first-token KL on heretic's ha
             path.write_text(json.dumps(kl, indent=1))
     sys.exit()
 
+if STAGE == "gevalid":   # gevalid <row> ...: the covrand coherence check (sweep/mission_gemma_envs.md): Grader validity on 64 main-family hack prompts (thinking off, 8-token
+    # answers, the Qwen sampling), as second_model.py klmatch's check; acts/gemma_envs/validity.json
+    from rhenvs.grader import side_of
+    path = GE / "validity.json"
+    res = json.loads(path.read_text()) if path.exists() else {}
+    prompts = [(f, side, render(grader_prompt(f, side, "hack"))) for f in MAIN_FAMILIES.values() for side in f["sides"]]
+    prompts = (prompts * 7)[:64]
+    for row in ARGS:
+        global_scale = None
+        u, c, window = ge_hook(row)
+        h = load_file(HOOKS / f"{row}.safetensors")
+        set_proj(u, c, window); proj_scale = float(h["scale"].item()) if "scale" in h else 1.0
+        ok = 0
+        with t.no_grad():
+            for f, side, ids in prompts:
+                out = model.generate(input_ids=t.tensor([ids], device="cuda"), max_new_tokens=8, do_sample=True, temperature=1.0, top_p=0.95, top_k=20)
+                ok += side_of(f, tok.decode(out[0, len(ids):], skip_special_tokens=True)) is not None
+        set_proj(None, None, []); proj_scale = 1.0
+        res[row] = dict(valid=ok / len(prompts), n=len(prompts), scale=float(h["scale"].item()) if "scale" in h else 1.0)
+        print(f"{cyan}{row}: Grader validity {ok}/{len(prompts)}{endc}")
+        path.write_text(json.dumps(res, indent=1))
+    sys.exit()
+
 if STAGE == "gebisect":   # gebisect <row> <target KL> <name>: the scale whose KL is within 15% of the target (bisection on s in (0, 64]), written as the hook ~/hooks/<name>.safetensors
     row, target, name = ARGS[0], float(ARGS[1]), ARGS[2]
     path = GE / "kl.json"
