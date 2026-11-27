@@ -482,6 +482,115 @@ if STAGE == "fit":
             save_direction("zrand", z[None].expand(N_LAYERS, -1), t.zeros(N_LAYERS, D_MODEL), ALL, dict(recipe="control for the A rows: one random unit direction, zero-ablated at every decoder layer", row="zrand", random_seed=SEED + 2))
     sys.exit()
 
+#%% sweep/mission_gemma_envs.md Part B (stages gefit, gekl, gebisect): env pair directions, the langdom / covrand controls, KL at given hook scales, control doses
+GE = Path("acts/gemma_envs")
+GE_VEC = VEC / "envs"
+
+def ge_save(name: str, rows: Tensor, pins: Tensor, meta: dict, scale: float | None = None) -> None:
+    """save_direction into data/vectors/<tag>/envs/ (sm_<name>) and ~/hooks/<name>.safetensors."""
+    global VEC
+    saved, VEC = VEC, GE_VEC
+    GE_VEC.mkdir(parents=True, exist_ok=True)
+    try: save_direction(name, rows, pins, STEP, meta, scale)
+    finally: VEC = saved
+
+def ge_fit_from(name: str, fit_pos: list, fit_neg: list, val_pos: list, val_neg: list, meta: dict, save_acts: str | None = None) -> None:
+    """The R recipe: last-token residuals, unit row per layer = positive mean - negative mean, pinned at the negative mean, the R window; held-out AUROC along each row."""
+    sets = dict(fit_pos=indexed(fit_pos), fit_neg=indexed(fit_neg), val_pos=indexed(val_pos), val_neg=indexed(val_neg))
+    acts = {k: last_resids(v, f"{name} {k}")[:, -1] for k, v in sets.items() if v}   # last prompt token only: [n, N, d] bf16
+    if save_acts: t.save(acts | dict(model=MODEL_ID, position="last prompt token", layout="[n, decoder layer L (0..N-1), d]"), save_acts)
+    pos, neg = acts["fit_pos"].float(), acts["fit_neg"].float()
+    mean_pos, mean_neg = pos.mean(0), neg.mean(0)
+    diff = mean_pos - mean_neg
+    dom = F.normalize(diff, dim=1)
+    stats = dict(diff_norm=diff.norm(dim=1).tolist(), neg_norm=mean_neg.norm(dim=1).tolist(), pin=(mean_neg * dom).sum(-1).tolist(), gap_over_neg_sd=((pos * dom).sum(-1).mean(0) - (neg * dom).sum(-1).mean(0)).div((neg * dom).sum(-1).std(0)).tolist(), n_pos=len(pos), n_neg=len(neg))
+    if "val_pos" in acts and len(acts["val_pos"]):
+        vp, vn = acts["val_pos"].float(), acts["val_neg"].float()
+        stats["val_auroc"] = {L: a for L, a in enumerate(auroc((vp * dom).sum(-1), (vn * dom).sum(-1)).tolist())}
+        rand = F.normalize(t.randn(N_LAYERS, D_MODEL, generator=t.Generator().manual_seed(SEED)), dim=1)
+        stats["val_auroc_random"] = {L: a for L, a in enumerate(auroc((vp * rand).sum(-1), (vn * rand).sum(-1)).tolist())}
+        stats["n_val_pos"], stats["n_val_neg"] = len(vp), len(vn)
+        print(f"{cyan}{name}: held-out AUROC on the R window: " + ", ".join(f"L{L} {stats['val_auroc'][L]:.3f}" for L in STEP) + f" (random rows " + ", ".join(f"{stats['val_auroc_random'][L]:.2f}" for L in STEP) + f"){endc}")
+    ge_save(name, dom, mean_neg, meta | stats | dict(recipe="R (refdom): last prompt token, unit row per layer (positive mean - negative mean), pinned at the negative mean, the R window, every position", row=name, position="last prompt token"))
+
+if STAGE == "gefit":
+    use_hook(None)
+    for name in ARGS:
+        if name == "langdom":
+            tr = json.loads((GE / "langdom_french.json").read_text())["items"]
+            te = json.loads((GE / "langdom_french_test.json").read_text())["items"] if (GE / "langdom_french_test.json").exists() else []
+            ge_fit_from("langdom", [dict(ids=refusal_render(x["fr"])) for x in tr], [dict(ids=refusal_render(x["en"])) for x in tr], [dict(ids=refusal_render(x["fr"])) for x in te], [dict(ids=refusal_render(x["en"])) for x in te],
+                        dict(env="language (French vs English)", positive="heretic's 400 harmless train prompts translated into French by base Gemma (thinking off, greedy)", negative="the same prompts in English", rendering="heretic's system prompt, thinking off (refusal_render, as refdom)", validation="heretic's 100 harmless test prompts, translated the same way"), save_acts=str(GE / "acts_langdom.pt"))
+        elif name == "covrand":
+            items = indexed([dict(ids=refusal_render(p)) for p in PROMPTS["harmless"]["train"][:400]])
+            x = last_resids(items, "covrand harmless train")[:, -1].float()   # [400, N, d]
+            xc = x - x.mean(0)
+            g = t.randn(len(items), generator=t.Generator().manual_seed(SEED))
+            rows = F.normalize(t.einsum("i,ild->ld", g, xc), dim=1)
+            ge_save("covrand", rows, x.mean(0), dict(env="none", recipe="covrand: per layer u = normalise(sum_i g_i (x_i - mean x)), x_i the base last-prompt-token residuals of heretic's 400 harmless train prompts (heretic's system prompt, thinking off), g_i ~ N(0, 1) seed 0; pinned at the harmless mean; the R window", row="covrand", random_seed=SEED))
+        else:
+            P = t.load(GE / "pairs" / f"{name}.pt")
+            tr, va = P["train"], P["val"]
+            assert len(tr) >= 50, f"{name}: {len(tr)} train pairs < 50"
+            ge_fit_from(f"{name}dom", [dict(ids=p["hack"]) for p in tr], [dict(ids=p["control"]) for p in tr], [dict(ids=p["hack"]) for p in va], [dict(ids=p["control"]) for p in va],
+                        dict(env=P["env"], unit=name, pairs=P["counts"], positive="hack-arm first-call prompt (thinking on, as served)", negative="control-arm twin of the same task"), save_acts=str(GE / f"acts_{name}.pt"))
+    sys.exit()
+
+def ge_hook(row: str) -> tuple:
+    h = load_file(HOOKS / f"{row}.safetensors")
+    window = h["layers"].tolist()
+    u = t.zeros(N_LAYERS, D_MODEL)
+    for k, L in enumerate(window): u[L] = h["u"].float() if h["u"].ndim == 1 else h["u"][k].float()
+    return u, h["c"].float(), window
+
+def ge_kl(row: str, scale: float) -> float:
+    global proj_scale
+    u, c, window = ge_hook(row)
+    set_proj(u, c, window); proj_scale = scale
+    v = first_token_kl(f"{row} s={scale:.4f}")
+    set_proj(None, None, []); proj_scale = 1.0
+    return v
+
+if STAGE == "gekl":   # gekl <row> <s> [<s> ...]: first-token KL on heretic's harmless test prompts under the row's hook scaled by s; acts/gemma_envs/kl.json
+    path = GE / "kl.json"
+    kl = json.loads(path.read_text()) if path.exists() else {}
+    row = ARGS[0]
+    for s in map(float, ARGS[1:]):
+        v = ge_kl(row, s)
+        kl.setdefault(row, {})[f"{s:.4f}"] = v
+        print(f"{cyan}{row} s={s:.4f}: first-token KL {v:.4f}{endc}")
+        path.write_text(json.dumps(kl, indent=1))
+    sys.exit()
+
+if STAGE == "gebisect":   # gebisect <row> <target KL> <name>: the scale whose KL is within 15% of the target (bisection on s in (0, 4]), written as the hook ~/hooks/<name>.safetensors
+    row, target, name = ARGS[0], float(ARGS[1]), ARGS[2]
+    path = GE / "kl.json"
+    kl = json.loads(path.read_text()) if path.exists() else {}
+    lo, hi, trace, found = 0.0, 1.0, [], None
+    while True:   # grow hi until KL(hi) >= target
+        v = ge_kl(row, hi); trace.append((hi, v)); kl.setdefault(row, {})[f"{hi:.4f}"] = v
+        if abs(v - target) <= 0.15 * target: found = (hi, v); break
+        if v >= target or hi >= 4.0: break
+        lo, hi = hi, hi * 2
+    for _ in range(16):
+        if found: break
+        mid = (lo + hi) / 2
+        v = ge_kl(row, mid); trace.append((mid, v)); kl.setdefault(row, {})[f"{mid:.4f}"] = v
+        print(f"{gray}{row}: s {mid:.4f} -> KL {v:.4f} (target {target:.4f}){endc}")
+        if abs(v - target) <= 0.15 * target: found = (mid, v); break
+        if v > target: hi = mid
+        else: lo = mid
+    path.write_text(json.dumps(kl, indent=1))
+    if found is None: found = min(trace, key=lambda x: abs(x[1] - target)); print(f"{yellow}{row}: no s within 15% of {target}; closest {found}{endc}")
+    h = load_file(HOOKS / f"{row}.safetensors")
+    save_file({k: v for k, v in h.items() if k != "scale"} | dict(scale=t.tensor(float(found[0]))), HOOKS / f"{name}.safetensors")
+    res_path = GE / "control_doses.json"
+    res = json.loads(res_path.read_text()) if res_path.exists() else {}
+    res[name] = dict(row=row, target_kl=target, scale=found[0], kl=found[1], within_15pct=abs(found[1] - target) <= 0.15 * target, trace=trace)
+    res_path.write_text(json.dumps(res, indent=1))
+    print(f"{cyan}{name}: {row} at s {found[0]:.4f}, KL {found[1]:.4f} (target {target:.4f}); hook {HOOKS / f'{name}.safetensors'}{endc}")
+    sys.exit()
+
 #%% arditi: the single selected direction
 def hack_score_items(items: list[dict]) -> tuple[list[dict], list[dict]]:
     """Grader: the prompt with the other side's canonical answer and with its own appended, for teacher forcing."""
