@@ -45,7 +45,7 @@ def env_cells(served: str, unit: tuple) -> dict | None:
         found = True
         for r in map(json.loads, (d / "records.jsonl").open()):
             key = r["rollout_id"].split("/", 1)[1]
-            out[f"{run}/{key}"] = T.hack_of(env, r)
+            out[key] = T.hack_of(env, r)   # keyed by sample id / epoch (unique within a unit across its runs), so a dose + rest pair joins a full grid run
             h = T.HONEST.get(env, (None, lambda r: None))[1](r)
             if h is not None: honest.append(bool(h))
     if not found: return None
