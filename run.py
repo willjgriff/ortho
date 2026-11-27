@@ -454,6 +454,12 @@ SM_EVALS = dict(g_off_main=sm_g_off_main, g_off_heldout=sm_g_off_heldout, g_on_m
 SM_ROWS = ("refdom", "gpdom", "tvpdom", "prand", "prandk_ref", "prandk_gp", "refarditi", "zrand", "gparditi", "tvarditi")   # prandk_*: KL-matched random controls (box G update 1)
 for row in SM_ROWS:
     globals().update({f"{row}_sm_{key}": replace(cfg, model=f"vllm/cb_{row}") for key, cfg in SM_EVALS.items()})
+# sweep/mission_gemma_envs.md Part B: Grader runs of the grid rows (GE_ROWS, comma-separated served row names, cb_<row>): thinking on, main and held-out families,
+# 128 per side per family (the pilot's sizes); _ge_g_dose = the dose search's own-env check for gpdom: held-out families, 5 per side (70 answers)
+import os as _os
+for row in [r for r in _os.environ.get("GE_ROWS", "").split(",") if r] + ["base"]:
+    globals().update({f"{row}_ge_g_on_main": replace(sm_g_on_main, model=f"vllm/cb_{row}"), f"{row}_ge_g_on_heldout": replace(sm_g_on_heldout, model=f"vllm/cb_{row}"),
+                      f"{row}_ge_g_dose": replace(sm_g_on_heldout, n=5, model=f"vllm/cb_{row}")})
 instances ={k: v for k, v in globals().items() if isinstance(v, EvalCfg)}
 if len(sys.argv) == 1:
     print(f"{bold}{purple}run.py{endc}  ./run.py <name> ...  {gray}the named runs, one after another{endc}")

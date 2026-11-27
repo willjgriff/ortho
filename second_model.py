@@ -254,6 +254,24 @@ if STAGE == "cosines":
     print("\n".join(lines)); print(f"{green}saved {OUT / 'cosines.md'}{endc}")
     sys.exit()
 
+if STAGE == "gecos":   # gecos <row> ...: sweep/mission_gemma_envs.md, per-layer cosines between the rows' hooks on the R window with a random-vector baseline; acts/gemma_envs/cosines.{json,md}
+    names = ARGS
+    dirs = {r: hook_rows(r) for r in names}
+    g = t.Generator().manual_seed(SEED)
+    rand_cos = F.cosine_similarity(t.randn(1000, D_MODEL, generator=g), t.randn(1000, D_MODEL, generator=g), dim=1).abs()
+    table = {}
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            per = F.cosine_similarity(dirs[a], dirs[b], dim=1)
+            table[f"{a} | {b}"] = dict(per_layer={L: round(per[L].item(), 4) for L in STEP}, mean_R=per[STEP].mean().item(), mean_abs_R=per[STEP].abs().mean().item())
+    lines = ["| a | b | " + " | ".join(f"L{L}" for L in STEP) + " | mean | mean abs |", "|---|---|" + "---|" * (len(STEP) + 2)]
+    lines += [f"| {k.split(' | ')[0]} | {k.split(' | ')[1]} | " + " | ".join(f"{v['per_layer'][L]:+.3f}" for L in STEP) + f" | {v['mean_R']:+.3f} | {v['mean_abs_R']:.3f} |" for k, v in table.items()]
+    lines.append(f"\nrandom unit vectors in {D_MODEL} dims (1,000 pairs): E|cos| {rand_cos.mean():.4f}, 95th percentile {rand_cos.quantile(0.95):.4f}, 99th {rand_cos.quantile(0.99):.4f}")
+    Path("acts/gemma_envs").mkdir(parents=True, exist_ok=True)
+    Path("acts/gemma_envs/cosines.json").write_text(json.dumps(dict(pairs=table, random_abs_mean=rand_cos.mean().item(), random_abs_p95=rand_cos.quantile(0.95).item(), R_window=STEP), indent=1))
+    Path("acts/gemma_envs/cosines.md").write_text("\n".join(lines) + "\n")
+    print("\n".join(lines)); sys.exit()
+
 #%% served: the served-vs-HF gate items (pilot records of the base model) need no model to pick, HF to score
 def served_items() -> list[dict]:
     """20 stored base answers from this model's pilot records: 7 grader (on), 7 refusal harmless (off), 6 TV verifier_bug mt4 (the whole transcript), by hash of the rollout id."""

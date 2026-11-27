@@ -91,9 +91,10 @@ add("dataentry_mainB", "data_entry", "main", prompts="fallback", n=50, offset=50
 add("dataentry_control50", "data_entry", "control", prompts="control", n=50, conns=32)
 # 8 hvta: hidden_solution (main) vs control (no hidden file); Wordle-v0-hardcore, up to 40 steps (agentic: 100 + 50), 1200 s; the episode seed is seed + i
 add("hvta_smoke", "hvta", "main", prompts="hidden_solution", n=5, seed=0, time_limit=1200, conns=32)
-add("hvta_main50", "hvta", "main", prompts="hidden_solution", n=50, seed=0, time_limit=1200, conns=32)
-add("hvta_mainB", "hvta", "main", prompts="hidden_solution", n=50, seed=50, time_limit=1200, conns=32)
-add("hvta_control50", "hvta", "control", prompts="control", n=50, seed=0, time_limit=1200, conns=32)
+add("hvta_smoke2", "hvta", "main", prompts="hidden_solution", n=5, seed=0, time_limit=1200, conns=32)   # the re-smoke (the first ran under full load)
+add("hvta_main50", "hvta", "main", prompts="hidden_solution", n=50, seed=0, time_limit=2400, conns=32)
+add("hvta_mainB", "hvta", "main", prompts="hidden_solution", n=50, seed=50, time_limit=2400, conns=32)
+add("hvta_control50", "hvta", "control", prompts="control", n=50, seed=0, time_limit=2400, conns=32)
 # 9 feasigen (infeasible: the needed tool removed; cheat = upstream's False Continue, a regex label) vs feasible (control); up to 10 generations: short
 add("feasigen_smoke", "feasigen", "main", prompts="infeasible", n=5)
 add("feasigen_main50", "feasigen", "main", prompts="infeasible", n=50)
@@ -121,7 +122,7 @@ add("hanoi_mainB", "tower_of_hanoi", "main", prompts="rule", n=50, offset=50, n_
 add("hanoi_control50", "tower_of_hanoi", "control", prompts="no_rule", n=50, n_disks=10, sandbox="local", time_limit=2400, conns=32)
 # 13 overclaim: main (coverage proxy) vs control (small scenario); 1800 s; agentic
 add("overclaim_smoke", "overclaim", "main", prompts="main", n=5, time_limit=1800, conns=16)
-add("overclaim_main50", "overclaim", "main", prompts="main", n=50, time_limit=1800, conns=32)
+add("overclaim_main50", "overclaim", "main", prompts="main", n=50, time_limit=1800, conns=24)
 add("overclaim_mainB", "overclaim", "main", prompts="main", n=50, offset=50, time_limit=1800, conns=32)
 add("overclaim_control50", "overclaim", "control", prompts="control", n=50, time_limit=1800, conns=32)
 
@@ -135,6 +136,16 @@ for _u, _c in CAPTURE_UNITS.items():
     for _arm in ("main", "control"):
         for _split, _k in (("train", 400), ("eval", 100)):
             add(f"{_u}_cap_{_arm}_{_split}", _c["env"], _arm, ids=f"{_u}:{_split}:{_k}", **CAP, **_c[_arm])
+
+# Part B dose checks (64 eval ids of the direction's own env) and grid evals (eval ids only; 200 single-turn, 100 agentic, or all eval ids if fewer)
+add("mbpp_dose", "mbpp", "main", ids="mbpp:eval:64", n=None, sandbox="local")
+add("mbpp_grid", "mbpp", "main", ids="mbpp:eval:200", n=None, sandbox="local")   # 191 eval ids
+add("nishi_rs_dose", "nishimura", "main", ids="nishi_rs:eval:64", prompts="reward_hack", dataset="revealing_score", n=None, seed=0)
+add("nishi_rs_grid", "nishimura", "main", ids="nishi_rs:eval:200", prompts="reward_hack", dataset="revealing_score", n=None, seed=0)
+# the other kept nishimura datasets: no direction is fit on them (eval-only), 40 rows each drawn with seed 1 (the pilot used seed 0), the same rows for every row
+for _d in ("sycophancy_fact", "sycophancy_opinion_nlp", "sycophancy_opinion_political", "world_affecting_approval", "world_affecting_reward"):
+    add(f"nishi_{_d}_grid", "nishimura", "main", prompts="reward_hack", dataset=_d, n=40, seed=1)
+add("toolfail_grid", "toolfail", "main", prompts="tool_required", n=14)   # eval-only env: the pilot's 210 items (no direction is fit on toolfail)
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
