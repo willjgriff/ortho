@@ -35,6 +35,7 @@ def register() -> None:
     window = saved["layers"].tolist()
     gen_only = "gen_only" in saved
     skip_first = "skip_first" in saved
+    shift = float(saved["shift"].item()) if "shift" in saved else None   # sweep/mission_stage9_envs.md: steering, a constant shift h <- h - shift u at every position of every window layer (u, layers as above; c unused)
     scale = float(saved["scale"].item()) if "scale" in saved else 1.0   # the KL-matched random controls (box G update 1): h <- h - scale ((h.u) - c) u   # the sequence's first token (Gemma's <bos>, a massive-activation sink) is left alone (sweep/mission_second_model.md, box G: every-position hooks of random directions destroyed the model through it)
     mask = []   # the one generated-token mask, made by the first hooked layer on the worker
 
@@ -78,6 +79,7 @@ def register() -> None:
 
     def correction(self, h: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         """((h.u) - c) u for the residual h [tokens, d_model], in h's dtype; what the hook subtracts. positions are the tokens' positions in their sequences."""
+        if shift is not None: return (shift * self.proj_u).to(h.dtype).expand(h.shape[0], -1)
         s = h.float() @ self.proj_u - self.proj_c
         if gen_only: s = s * self.proj_gen[:s.shape[0]]
         if skip_first: s = s * (positions[:s.shape[0]] != 0).to(s.dtype)

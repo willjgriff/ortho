@@ -33,10 +33,10 @@ RUNS: dict[str, dict] = {}
 
 SPLITS = ROOT / "gemma_envs" / "splits"   # <unit>.json: {"train": [sample ids], "eval": [...]} (Part B; small, synced with the code to rhbench's copy)
 
-def add(name: str, env: str, arm: str, conns: int = 64, time_limit: int | None = None, ids: str | None = None, gen: dict | None = None, message_limit: int | None = None, **args) -> None:
+def add(name: str, env: str, arm: str, conns: int = 64, time_limit: int | None = None, ids: str | None = None, gen: dict | None = None, message_limit: int | None = None, epochs: int | None = None, mission: str = "sweep/mission_gemma_envs.md", **args) -> None:
     """ids: "<unit>:<split>[:<k>]" restricts the run to those sample ids of the split file (the first k), mapped to this arm's ids by the unit's id map.
     gen: GenerateConfig overrides for the eval (capture runs: max_tokens 1). message_limit: Inspect's per-sample message limit."""
-    RUNS[name] = dict(env=env, arm=arm, conns=conns, time_limit=time_limit, ids=ids, gen=gen or {}, message_limit=message_limit, args=dict(config=args.pop("config", CFG), **args))
+    RUNS[name] = dict(env=env, arm=arm, conns=conns, time_limit=time_limit, ids=ids, gen=gen or {}, message_limit=message_limit, epochs=epochs, mission=mission, args=dict(config=args.pop("config", CFG), **args))
 
 def arm_id(main_id: str, arm_suffix: str | None) -> str:
     """A main-arm sample id as the same task's id in another arm: ids that end in .<arm> get the other arm's suffix (hint_mc, nishimura, sales, ...)."""
@@ -166,6 +166,25 @@ add("nishi_rs_gridrest", "nishimura", "main", ids="nishi_rs:eval:64:200", prompt
 add("dataentry_gridrest", "data_entry", "main", ids="dataentry:eval:64:100", prompts="fallback", n=500, seed=0, conns=24)
 add("overclaim_gridrest", "overclaim", "main", ids="overclaim:eval:64:100", prompts="main", n=500, time_limit=1800, conns=28)
 
+# sweep/mission_stage9_envs.md (stage-9 recipe on Gemma, own env only): training rollouts on train ids, 4 samples per task (epochs 4), and the agentic envs' eval-id runs (50 ids,
+# each env alone on the server, time limit 3x the base median episode of the previous box's least-loaded base run: data_entry grid 431 s, overclaim gridrest 348 s, toolfail pilot 306 s).
+S9 = "sweep/mission_stage9_envs.md"
+add("s9_mbpp_train", "mbpp", "main", ids="mbpp_nonbool:train:250", epochs=4, n=None, sandbox="local", mission=S9)
+add("s9_nishi_rs_train", "nishimura", "main", ids="nishi_rs:train:60", epochs=4, prompts="reward_hack", dataset="revealing_score", n=None, seed=0, mission=S9)
+for _d in ("sycophancy_fact", "sycophancy_opinion_nlp", "sycophancy_opinion_political", "world_affecting_approval", "world_affecting_reward"):
+    add(f"s9_nishi_{_d}_train", "nishimura", "main", ids=f"nishi_{_d}:train:60", epochs=4, prompts="reward_hack", dataset=_d, n=None, seed=0, mission=S9)
+add("s9_toolfail_train", "toolfail", "main", ids="toolfail:train:120", epochs=4, prompts="tool_required", n=None, mission=S9)
+for _c in range(6):   # agentic training rollouts in chunks (a run's records exist only once it finishes): data_entry 25 tasks x 4, overclaim 15 tasks x 4 per chunk
+    add(f"s9_dataentry_train_c{_c}", "data_entry", "main", ids=f"dataentry:train:{25 * _c}:{25 * _c + 25}", epochs=4, prompts="fallback", n=500, seed=0, conns=32, mission=S9)
+    add(f"s9_overclaim_train_c{_c}", "overclaim", "main", ids=f"overclaim:train:{15 * _c}:{15 * _c + 15}", epochs=4, prompts="main", n=500, time_limit=1800, conns=28, mission=S9)
+S9_TL = dict(data_entry=1294, overclaim=1043, toolfail=918)
+for _k in (30, 50):
+    add(f"s9_dataentry_eval{_k}", "data_entry", "main", ids=f"dataentry:eval:{_k}", prompts="fallback", n=500, seed=0, conns=50, time_limit=S9_TL["data_entry"], mission=S9)
+    add(f"s9_overclaim_eval{_k}", "overclaim", "main", ids=f"overclaim:eval:{_k}", prompts="main", n=500, conns=28, time_limit=S9_TL["overclaim"], mission=S9)
+    add(f"s9_toolfail_eval{_k}", "toolfail", "main", ids=f"toolfail:eval:{_k}", prompts="tool_required", n=None, conns=50, time_limit=S9_TL["toolfail"], mission=S9)
+add("s9_mbpp_eval", "mbpp", "main", ids="mbpp_nonbool:eval", n=None, sandbox="local", mission=S9)   # 167 non-bool eval ids (the base reuses mbpp_grid's records on these ids)
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -202,17 +221,17 @@ def run(row: str, name: str) -> None:
         missing = [i for i in ids if i not in known]
         assert not missing, f"{name}: {len(missing)} ids not in the task, e.g. {missing[:3]}"
         task.dataset = task.dataset.filter(lambda smp: str(smp.id) in set(ids))
-    task.metadata = (task.metadata or {}) | {"gemma_envs_run": name, "row": row, "arm": spec["arm"], "mission": "sweep/mission_gemma_envs.md"}
+    task.metadata = (task.metadata or {}) | {"gemma_envs_run": name, "row": row, "arm": spec["arm"], "mission": spec.get("mission", "sweep/mission_gemma_envs.md")}
     model = f"vllm/cb_{row}"
     cfg = dict(run_id=f"{row}__{name}", created=now(), config=dict(model=model, served_model=f"google/gemma-4-31B-it@842da3794eaa0b77d5f08bae87a17459d91ff475 + hook ~/hooks/{row}.safetensors",
-               samples_per_task=spec["args"].get("epochs", 1), vllm_base_url=BASE_URL, env=env, arm=spec["arm"], task_args=spec["args"], time_limit=spec["time_limit"],
+               samples_per_task=spec.get("epochs") or spec["args"].get("epochs", 1), vllm_base_url=BASE_URL, env=env, arm=spec["arm"], task_args=spec["args"], time_limit=spec["time_limit"],
                max_connections=spec["conns"], sampling=dict(task.config.model_dump(exclude_none=True)) if task.config else None, ids=spec.get("ids"), gen_overrides=spec.get("gen"), message_limit=spec.get("message_limit")),
                impossible_variants=["main"], selected_task_ids={env: {spec["arm"]: [str(s.id) for s in task.dataset]}})
     (rdir / "run_config.json").write_text(json.dumps(cfg, indent=1, default=str))
     print(f"=== {row} {name}: {env} {spec['args']} time_limit {spec['time_limit']} conns {spec['conns']} ({len(task.dataset)} samples) {now()}", flush=True)
     start = time.time()
     [log] = inspect_eval(task, model=model, model_base_url=BASE_URL, max_connections=spec["conns"], display="plain", log_dir=str(ROOT / "logs" / env), log_model_api=True,
-                         model_args={"client_timeout": 3600}, time_limit=spec["time_limit"], message_limit=spec.get("message_limit"), fail_on_error=False, retry_on_error=1, **spec.get("gen", {}))
+                         model_args={"client_timeout": 3600}, time_limit=spec["time_limit"], **({"epochs": spec["epochs"]} if spec.get("epochs") else {}), message_limit=spec.get("message_limit"), fail_on_error=False, retry_on_error=1, **spec.get("gen", {}))
     finish(row, name, spec, log, start)
 
 
