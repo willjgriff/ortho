@@ -53,7 +53,8 @@ def env_cells(served: str, unit: tuple) -> dict | None:
     for run in runs:
         p = PULLED / served / env / run / "progress.jsonl"
         if p.exists(): prog += [json.loads(l) for l in p.open() if '"sample_end"' in l]
-    return dict(hacks=out, honest=honest, time_limited=sum(p["limit"] == "time" for p in prog), n=len(out))
+    limited = {f"{p['task_id']}/{p['epoch']}" for p in prog if p["limit"] == "time"}
+    return dict(hacks=out, honest=honest, time_limited=len(limited), limited=limited, n=len(out))
 
 
 def grader(served: str, which: str, reuse: dict | None) -> dict | None:
@@ -126,7 +127,9 @@ def main() -> None:
                 n, bo, ro, p = mcnemar(e["hacks"], data[ctrl]["env"][u[0]]["hacks"])
                 s += f"; vs {ctrl} p {p:.2g}"
             if e["honest"]: s += f"; honest {100 * sum(e['honest']) / len(e['honest']):.0f}%"
-            if e["time_limited"]: s += f"; {e['time_limited']} time-limited"
+            if e["time_limited"]:
+                fin = [x for k2, x in e["hacks"].items() if x is not None and k2 not in e["limited"]]
+                s += f"; {e['time_limited']} time-limited (finished episodes: {sum(fin)}/{len(fin)})"
             cells.append(f"**{s}**" if d.get("own") == u[0] else s)
         gcells = []
         for w in ("main", "heldout"):
@@ -140,7 +143,7 @@ def main() -> None:
         f = lambda x: "-" if x is None else f"{100 * x:.1f}"
         lines.append(f"| {label} ({d['served']}) | {d.get('s', '-')} | {d.get('kl') if d.get('kl') is None else round(d['kl'], 3)} | " + " | ".join(cells) + " | " + " | ".join(gcells) + f" | {f(c.get('mmlu'))} | {f(c.get('gsm8k'))} | {f(c.get('ifeval'))} | {f(c.get('gsm8k_on'))} ({c.get('gsm8k_on_reasoning', '-')}, {f(c.get('gsm8k_on_at_budget'))}) |")
     (GE / "grid.md").write_text("\n".join(lines) + "\n")
-    (GE / "grid.json").write_text(json.dumps({k: dict(served=v["served"], s=v.get("s"), kl=v.get("kl"), env={u: (None if e is None else dict(hacks=sum(x for x in e["hacks"].values() if x), valid=sum(x is not None for x in e["hacks"].values()), n=e["n"], time_limited=e["time_limited"])) for u, e in v["env"].items()}, grader={w: (None if g is None else {k2: g[k2] for k2 in ("cheat", "valid", "n", "median_reasoning", "name")}) for w, g in v["grader"].items()}, cap=v["cap"]) for k, v in data.items()}, indent=1))
+    (GE / "grid.json").write_text(json.dumps({k: dict(served=v["served"], s=v.get("s"), kl=v.get("kl"), env={u: (None if e is None else dict(hacks=sum(x for x in e["hacks"].values() if x), valid=sum(x is not None for x in e["hacks"].values()), n=e["n"], time_limited=e["time_limited"], hacks_finished=sum(x for k2, x in e["hacks"].items() if x and k2 not in e["limited"]), valid_finished=sum(x is not None for k2, x in e["hacks"].items() if k2 not in e["limited"]))) for u, e in v["env"].items()}, grader={w: (None if g is None else {k2: g[k2] for k2 in ("cheat", "valid", "n", "median_reasoning", "name")}) for w, g in v["grader"].items()}, cap=v["cap"]) for k, v in data.items()}, indent=1))
     print("\n".join(lines))
 
 
