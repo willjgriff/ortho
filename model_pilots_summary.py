@@ -39,6 +39,8 @@ def main():
     out.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for u, name in UNITS:
         g, x, c = by.get(f"mp_{u}_g20"), by.get(f"mp_{u}_x30"), by.get(f"mp_{u}_c20")
+        if c is None and u.startswith("hint_"):   # both hint types share one no-hint control (the same prompts=none run)
+            c = by.get("mp_hint_grader_c20") or by.get("mp_hint_metadata_c20")
         v, p = verdict(g, x)
         mains = [r for r in (g, x) if r]
         K, N, KV, V = sum(r["hacks"] for r in mains), sum(r["n"] for r in mains), sum(r["hacks"] for r in mains), sum(r["valid"] for r in mains)

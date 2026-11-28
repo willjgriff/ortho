@@ -6,12 +6,13 @@
 row=$1
 case ${SM_MODEL:-gemma4_31b} in
 gemma4_31b) MODEL=google/gemma-4-31B-it; REVISION=842da3794eaa0b77d5f08bae87a17459d91ff475; FLAGS="--reasoning-parser gemma4 --language-model-only --enable-auto-tool-choice --tool-call-parser gemma4";;   # multimodal checkpoint served text-only; tool parser for the tool-calling envs of sweep/mission_gemma_envs.md (data_entry, revert, hanoi, overclaim)
-# sweep/mission_model_pilots.md (bf16, revisions pinned; flags from each model card, tool parser for data_entry / TV / sales)
+# sweep/mission_model_pilots.md (bf16, revisions pinned; flags from each model card, tool parser for data_entry / TV / sales). K2: the model's template with earlier
+# assistant turns rendered without raising (model_pilots_templates/k2_horizon_history.jinja; single-turn prompts render identically)
 nanbeige43_33b) MODEL=Nanbeige/Nanbeige4.3-33B; REVISION=df919e1e2cf077a22204c78b6c826bf3db18bc08; FLAGS="--trust-remote-code --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder";;
-k2h_32b) MODEL=IFM/K2-Horizon-32B; REVISION=ddf8fe2bf05b403790061f7d458cb31f22d9761f; FLAGS="--model-impl vllm --trust-remote-code --dtype bfloat16 --reasoning-parser k2_horizon --enable-auto-tool-choice --tool-call-parser k2_horizon";;
-k2h_mova_36b) MODEL=IFM/K2-Horizon-MoVA-36B-A4B; REVISION=3fb5edfa484350459fb6b7461f80b5701b7dd6b4; FLAGS="--model-impl vllm --trust-remote-code --dtype bfloat16 --reasoning-parser k2_horizon --enable-auto-tool-choice --tool-call-parser k2_horizon";;
-k2h_7b) MODEL=IFM/K2-Horizon-7B; REVISION=4e551ff236eed827690a6804b6d360135347a835; FLAGS="--model-impl vllm --trust-remote-code --dtype bfloat16 --reasoning-parser k2_horizon --enable-auto-tool-choice --tool-call-parser k2_horizon";;
-muse_glimmer_30b) MODEL=meta-models/Muse-Glimmer-30B; REVISION=1297fd7dfeac4598948a5d15886968435c81c2b7; FLAGS="${MUSE_FLAGS:---language-model-only}";;
+k2h_32b) MODEL=IFM/K2-Horizon-32B; REVISION=ddf8fe2bf05b403790061f7d458cb31f22d9761f; FLAGS="--model-impl vllm --trust-remote-code --dtype bfloat16 --reasoning-parser k2_horizon --enable-auto-tool-choice --tool-call-parser k2_horizon --chat-template $HOME/ortho/model_pilots_templates/k2_horizon_history.jinja";;
+k2h_mova_36b) MODEL=IFM/K2-Horizon-MoVA-36B-A4B; REVISION=3fb5edfa484350459fb6b7461f80b5701b7dd6b4; FLAGS="--model-impl vllm --trust-remote-code --dtype bfloat16 --reasoning-parser k2_horizon --enable-auto-tool-choice --tool-call-parser k2_horizon --chat-template $HOME/ortho/model_pilots_templates/k2_horizon_history.jinja";;
+k2h_7b) MODEL=IFM/K2-Horizon-7B; REVISION=4e551ff236eed827690a6804b6d360135347a835; FLAGS="--model-impl vllm --trust-remote-code --dtype bfloat16 --reasoning-parser k2_horizon --enable-auto-tool-choice --tool-call-parser k2_horizon --chat-template $HOME/ortho/model_pilots_templates/k2_horizon_history.jinja";;
+muse_glimmer_30b) MODEL=meta-models/Muse-Glimmer-30B; REVISION=1297fd7dfeac4598948a5d15886968435c81c2b7; FLAGS="--language-model-only --reasoning-parser muse_glimmer --enable-auto-tool-choice --tool-call-parser muse_glimmer";;   # multimodal checkpoint served text-only
 *) echo "unknown SM_MODEL ${SM_MODEL}"; exit 1;;
 esac
 tmux kill-session -t vllm 2>/dev/null
