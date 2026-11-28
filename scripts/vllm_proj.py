@@ -6,7 +6,11 @@ prompt (generated_mask), so a multi-turn history gets the hook it had when it wa
 Models (sweep/mission_second_model.md: the model is a parameter, one plugin): the decoder layer class of every supported model is patched when its module imports.
 - Qwen3.5 / Qwen3.8 (qwen3_5.Qwen3_5DecoderLayer, forward from qwen3_next): a layer returns (mlp output, residual) and its output is their sum, so the correction goes on the mlp output. The MTP draft layers are left alone.
 - Gemma 4 (gemma4.Gemma4DecoderLayer): a layer returns (hidden_states, None) with hidden_states the full residual after the layer's scalar, so the correction goes on hidden_states directly; the layer's index is its layer_idx.
+- Llama (llama.LlamaDecoderLayer: Nanbeige4.3) and K2 Horizon (k2_horizon.K2HorizonDecoderLayer, dense and MoVA): as Qwen, the layer returns (mlp output, residual), the output is their sum.
+- Muse Glimmer (muse_glimmer.MuseGlimmerDecoderLayer): as Gemma 4, the layer returns the full residual as hidden_states (sweep/mission_model_pilots.md).
+  For these three the layer index is extract_layer_index(prefix).
 gen_only's generated_mask knows the Qwen template's tokens only (IM_START / IM_END / <think>); no second-model row uses gen_only."""
+import importlib
 import os
 
 import numpy as np
@@ -127,3 +131,33 @@ def register() -> None:
 
         gemma4.Gemma4DecoderLayer.__init__ = g_patched_init
         gemma4.Gemma4DecoderLayer.forward = g_patched_forward
+
+    # sweep/mission_model_pilots.md: Llama / K2 Horizon (output = hidden_states + residual) and Muse Glimmer (output = hidden_states), layer index from the prefix
+    def generic(modname: str, clsname: str, full_residual: bool) -> None:
+        try:
+            mod = importlib.import_module(f"vllm.model_executor.models.{modname}")
+        except ImportError:
+            return
+        from vllm.model_executor.models.utils import extract_layer_index
+        cls = getattr(mod, clsname)
+        if getattr(cls, "_proj_patched", False): return
+        x_init, x_forward = cls.__init__, cls.forward
+
+        def x_patched_init(self, *a, **kw):
+            x_init(self, *a, **kw)
+            prefix = kw.get("prefix", a[-1] if a and isinstance(a[-1], str) else "")
+            vcfg = kw.get("vllm_config", a[0] if a and type(a[0]).__name__ == "VllmConfig" else None)
+            attach(self, vcfg, extract_layer_index(prefix), prefix)
+
+        def x_patched_forward(self, positions, hidden_states, residual, *a, **kw):
+            hidden_states, residual = x_forward(self, positions, hidden_states, residual, *a, **kw)
+            if getattr(self, "proj_on", False):
+                full = hidden_states if full_residual else hidden_states + residual
+                hidden_states = hidden_states - correction(self, full, positions)
+            return hidden_states, residual
+
+        cls.__init__, cls.forward, cls._proj_patched = x_patched_init, x_patched_forward, True
+
+    generic("llama", "LlamaDecoderLayer", False)
+    generic("k2_horizon", "K2HorizonDecoderLayer", False)
+    generic("muse_glimmer", "MuseGlimmerDecoderLayer", True)

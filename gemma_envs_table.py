@@ -65,7 +65,7 @@ def log_stats(rdir: Path) -> dict:
     if not evals: return {}
     log = read_eval_log(str(evals[-1]))
     calls = [e for s in log.samples for e in s.events if e.event == "model" and e.call is not None and e.call.response]
-    at_budget = sum(1 for e in calls if ((e.call.response.get("usage") or {}).get("completion_tokens_details") or {}).get("reasoning_tokens", 0) >= BUDGET)
+    at_budget = sum(1 for e in calls if ((e.call.response.get("usage") or {}).get("completion_tokens_details") or {}).get("reasoning_tokens", 0) >= BUDGET - 2)   # vLLM counts 4095 when the budget forces the end
     cut = sum(1 for e in calls if any(c.get("finish_reason") == "length" for c in (e.call.response.get("choices") or [])))
     last_cut = sum(1 for s in log.samples if s.output and s.output.stop_reason == "max_tokens")
     return dict(calls=len(calls), at_budget=at_budget, calls_cut=cut, last_cut=last_cut)

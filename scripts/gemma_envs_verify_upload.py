@@ -6,11 +6,14 @@ from pathlib import Path
 
 from huggingface_hub import HfApi
 
-TAG = os.environ.get("SM_MODEL", "gemma4_31b")
+TAG = os.environ.get("GE_TAG", os.environ.get("SM_MODEL", "gemma4_31b"))   # sweep/mission_model_pilots.md: any other tag stages under /root/mp_out/<tag>/stage, uploads under model_pilots/<tag>/
 env = dict(line.strip().split("=", 1) for line in Path("/root/.config/rhablation/upload.env").read_text().splitlines() if "=" in line and not line.startswith("#"))
 env = {k: v.strip().strip('"').strip("'") for k, v in env.items()}
 api = HfApi(token=env["HF_TOKEN"])
-STAGE, PRIVATE = Path("/root/gemma_envs_out/stage"), Path("/nonexistent")
+GEMMA = TAG == "gemma4_31b"
+STAGE = Path("/root/gemma_envs_out/stage") if GEMMA else Path(f"/root/mp_out/{TAG}/stage")
+PRIVATE = Path("/nonexistent") if GEMMA else STAGE / "private"
+DEST = f"second_model/{TAG}/envs" if GEMMA else f"model_pilots/{TAG}"
 whats = sys.argv[1:] or sorted(p.name for p in STAGE.iterdir() if p.is_dir()) 
 
 def remote(repo: str, prefix: str) -> dict[str, int]:
@@ -18,7 +21,9 @@ def remote(repo: str, prefix: str) -> dict[str, int]:
 
 bad = 0
 for what in whats:
-    local_dir, repo, prefix = (PRIVATE, env["HF_PRIVATE_REPO"], f"second_model/{TAG}/private") if what == "private" else (STAGE / what, env["HF_UPLOAD_REPO"], f"second_model/{TAG}/envs/{what}")
+    if what == "private": local_dir, repo, prefix = PRIVATE, env["HF_PRIVATE_REPO"], (f"second_model/{TAG}/private" if GEMMA else f"{DEST}/refusal")
+    elif what == "report" and not GEMMA: local_dir, repo, prefix = STAGE / what, env["HF_UPLOAD_REPO"], "model_pilots/report"
+    else: local_dir, repo, prefix = STAGE / what, env["HF_UPLOAD_REPO"], f"{DEST}/{what}"
     local = {str(p.relative_to(local_dir)): p.stat().st_size for p in local_dir.rglob("*") if p.is_file()} if local_dir.exists() else {}
     if not local: print(f"{what}: nothing staged"); continue
     try: rem = remote(repo, prefix)
